@@ -3,36 +3,33 @@ import pandas as pd
 from datetime import datetime
 from supabase import create_client, Client
 
-# --- CONFIGURACIÓN DE CONEXIÓN SEGURA ---
-# Lee las llaves desde la sección 'Secrets' de Streamlit Cloud
-try:
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    supabase: Client = create_client(url, key)
-except Exception as e:
-    st.error("Error de configuración: Revisa los Secrets en Streamlit Cloud.")
-    st.stop()
+# --- CONFIGURACIÓN DE SUPABASE ---
+# Asegúrate de que no haya espacios ni puntos extra al final de estas comillas
+SUPABASE_URL = "https://supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlja2hsZHptb3NucGRrY21sb3p3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4NzEwMDUsImV4cCI6MjA5MzQ0NzAwNX0.0bRWZKfE7ES_v7AkXP93cXZqN_s7l2pkZolDNnSta5c" # <--- PEGA AQUÍ LA SECRET KEY DE TU FOTO
 
-st.set_page_config(page_title="Sistema POS Profesional", layout="wide")
+# Conexión a la base de datos
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+st.set_page_config(page_title="Sistema POS Pro - Supabase", layout="wide")
 
 # --- MEMORIA DEL SISTEMA ---
 if 'autenticado' not in st.session_state:
     st.session_state.update({'autenticado': False, 'rol': None, 'usuario': ""})
 
-# --- FUNCIONES DE BASE DE DATOS ---
-def cargar_ventas():
+# Función para traer ventas de la nube
+def cargar_datos_nube():
     try:
-        respuesta = supabase.table("ventas").select("*").execute()
-        return pd.DataFrame(respuesta.data)
-    except:
-        return pd.DataFrame()
+        response = supabase.table("ventas").select("*").execute()
+        return pd.DataFrame(response.data)
+    except Exception as e:
+        return pd.DataFrame(columns=["created_at", "producto", "precio", "cantidad", "total", "vendedor"])
 
-# --- PANTALLA DE LOGIN ---
+# --- PANTALLA DE LOGIN (Igual que antes) ---
 if not st.session_state['autenticado']:
-    st.title("🔐 Acceso al Sistema de Ventas")
+    st.title("🔐 Acceso al Sistema")
     user = st.text_input("Usuario")
     password = st.text_input("Contraseña", type="password")
-    
     if st.button("Iniciar Sesión"):
         if user == "dueño" and password == "admin123":
             st.session_state.update({"autenticado": True, "rol": "admin", "usuario": user})
@@ -42,27 +39,22 @@ if not st.session_state['autenticado']:
             st.rerun()
         else:
             st.error("Credenciales incorrectas")
-
 else:
-    # --- INTERFAZ PRINCIPAL ---
-    st.sidebar.header(f"Bienvenido, {st.session_state['usuario'].capitalize()}")
-    st.sidebar.write(f"Rol: *{st.session_state['rol'].upper()}*")
+    # --- SISTEMA PRINCIPAL ---
+    df_ventas = cargar_datos_nube()
     
-    # Botón de borrar historial (Solo Dueño)
-    if st.session_state['rol'] == "admin":
-        if st.sidebar.button("🗑️ Borrar todo en la Nube"):
-            # Este comando borra las filas de la tabla ventas en Supabase
-            supabase.table("ventas").delete().neq("id", 0).execute()
-            st.sidebar.success("Historial borrado")
+    with st.sidebar:
+        st.header(f"Hola, {st.session_state['usuario'].capitalize()}")
+        if st.session_state['rol'] == "admin":
+            if st.button("🗑️ Borrar Historial (Nube)"):
+                supabase.table("ventas").delete().neq("producto", "none").execute()
+                st.rerun()
+        if st.button("Cerrar Sesión"):
+            st.session_state.update({"autenticado": False, "rol": None, "usuario": ""})
             st.rerun()
-            
-    if st.sidebar.button("Cerrar Sesión"):
-        st.session_state.update({'autenticado': False, 'rol': None, 'usuario': ""})
-        st.rerun()
 
-    st.title("🚀 Gestión de Restaurante (Cloud)")
+    st.title("🚀 Gestión en la Nube")
     
-    # Registrar Venta
     with st.expander("➕ Registrar Nueva Venta", expanded=True):
         productos = {"Corrientazo": 15000, "Gaseosa": 3500, "Jugos": 5000, "Bandeja Paisa": 25000}
         c1, c2 = st.columns(2)
@@ -73,35 +65,28 @@ else:
             
         if st.button("Confirmar Venta"):
             try:
-                datos = {
+                precio = productos[prod]
+                total = precio * cant
+                vendedor = st.session_state['usuario']
+                
+                # ENVIAR A SUPABASE
+                datos_venta = {
                     "producto": prod,
-                    "precio": productos[prod],
+                    "precio": precio,
                     "cantidad": cant,
-                    "total": productos[prod] * cant,
-                    "atendido_por": st.session_state['usuario']
+                    "total": total,
+                    "vendedor": vendedor
                 }
-                supabase.table("ventas").insert(datos).execute()
-                st.success(f"✅ Venta guardada en Supabase por {st.session_state['usuario']}")
+                supabase.table("ventas").insert(datos_venta).execute()
+                st.success(f"✅ Venta guardada en la nube!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Error al guardar: {e}")
 
-    # Mostrar Historial
     st.divider()
-    st.subheader("📊 Historial de Ventas")
-    df = cargar_ventas()
-    
-    if not df.empty:
-        # Reordenamos columnas para que se vea mejor
-        columnas_orden = ["created_at", "producto", "precio", "cantidad", "total", "atendido_por"]
-        # Filtrar solo las que existan para evitar errores si los nombres cambian
-        cols_finales = [c for c in columnas_orden if c in df.columns]
-        st.dataframe(df[cols_finales], use_container_width=True)
-        
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric("RECAUDO TOTAL", f"${df['total'].sum():,} COP")
-        with c2:
-            st.metric("NÚMERO DE VENTAS", len(df))
+    st.subheader("📊 Historial de Ventas Reales")
+    if not df_ventas.empty:
+        st.dataframe(df_ventas, use_container_width=True)
+        st.metric("RECAUDO TOTAL", f"${df_ventas['total'].sum():,} COP")
     else:
-        st.info("Aún no hay ventas registradas en la base de datos.")
+        st.info("No hay ventas registradas en la base de datos.")
