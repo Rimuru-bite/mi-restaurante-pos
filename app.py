@@ -3,90 +3,78 @@ import pandas as pd
 from datetime import datetime
 from supabase import create_client, Client
 
-# --- CONFIGURACIÓN DE SUPABASE ---
-# Asegúrate de que no haya espacios ni puntos extra al final de estas comillas
-SUPABASE_URL = st.secrets["SUPABASE_URL"]
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"]# <--- PEGA AQUÍ LA SECRET KEY DE TU FOTO
+# --- CONEXIÓN LIMPIA A SUPABASE ---
+try:
+    # Esto lee los Secrets que configuraste en la web de Streamlit
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    supabase: Client = create_client(url, key)
+except Exception as e:
+    st.error("⚠️ Error de configuración: No se encontraron los Secrets (URL o KEY).")
+    st.stop()
 
-# Conexión a la base de datos
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+st.set_page_config(page_title="Sistema POS Pro", layout="wide")
 
-st.set_page_config(page_title="Sistema POS Pro - Supabase", layout="wide")
+# --- FUNCIONES DE DATOS ---
+def cargar_datos_nube():
+    try:
+        # Trae las ventas de la tabla llamada 'ventas'
+        res = supabase.table("ventas").select("*").execute()
+        return pd.DataFrame(res.data)
+    except:
+        return pd.DataFrame(columns=["producto", "precio", "cantidad", "total", "vendedor"])
 
-# --- MEMORIA DEL SISTEMA ---
+# --- LÓGICA DE LOGIN ---
 if 'autenticado' not in st.session_state:
     st.session_state.update({'autenticado': False, 'rol': None, 'usuario': ""})
 
-# Función para traer ventas de la nube
-def cargar_datos_nube():
-    try:
-        response = supabase.table("ventas").select("*").execute()
-        return pd.DataFrame(response.data)
-    except Exception as e:
-        return pd.DataFrame(columns=["created_at", "producto", "precio", "cantidad", "total", "vendedor"])
-
-# --- PANTALLA DE LOGIN (Igual que antes) ---
 if not st.session_state['autenticado']:
-    st.title("🔐 Acceso al Sistema")
-    user = st.text_input("Usuario")
-    password = st.text_input("Contraseña", type="password")
-    if st.button("Iniciar Sesión"):
-        if user == "dueño" and password == "admin123":
-            st.session_state.update({"autenticado": True, "rol": "admin", "usuario": user})
+    st.title("🔐 Acceso")
+    u = st.text_input("Usuario")
+    p = st.text_input("Contraseña", type="password")
+    if st.button("Entrar"):
+        if u == "dueño" and p == "admin123":
+            st.session_state.update({"autenticado": True, "rol": "admin", "usuario": u})
             st.rerun()
-        elif user == "mesero" and password == "venta123":
-            st.session_state.update({"autenticado": True, "rol": "empleado", "usuario": user})
+        elif u == "mesero" and p == "venta123":
+            st.session_state.update({"autenticado": True, "rol": "empleado", "usuario": u})
             st.rerun()
         else:
-            st.error("Credenciales incorrectas")
+            st.error("Datos incorrectos")
 else:
-    # --- SISTEMA PRINCIPAL ---
-    df_ventas = cargar_datos_nube()
+    # --- APP PRINCIPAL ---
+    df = cargar_datos_nube()
     
     with st.sidebar:
-        st.header(f"Hola, {st.session_state['usuario'].capitalize()}")
-        if st.session_state['rol'] == "admin":
-            if st.button("🗑️ Borrar Historial (Nube)"):
-                supabase.table("ventas").delete().neq("producto", "none").execute()
-                st.rerun()
+        st.write(f"Usuario: {st.session_state['usuario']}")
         if st.button("Cerrar Sesión"):
-            st.session_state.update({"autenticado": False, "rol": None, "usuario": ""})
+            st.session_state.update({"autenticado": False, "rol": None})
             st.rerun()
 
-    st.title("🚀 Gestión en la Nube")
+    st.title("🚀 Registro de Ventas")
     
-    with st.expander("➕ Registrar Nueva Venta", expanded=True):
-        productos = {"Corrientazo": 15000, "Gaseosa": 3500, "Jugos": 5000, "Bandeja Paisa": 25000}
-        c1, c2 = st.columns(2)
-        with c1:
-            prod = st.selectbox("Producto", list(productos.keys()))
-        with c2:
-            cant = st.number_input("Cantidad", min_value=1, value=1)
-            
-        if st.button("Confirmar Venta"):
+    with st.expander("Registrar Venta", expanded=True):
+        productos = {"Corrientazo": 15000, "Gaseosa": 3500}
+        prod = st.selectbox("Producto", list(productos.keys()))
+        cant = st.number_input("Cantidad", min_value=1, value=1)
+        
+        if st.button("Confirmar"):
+            # Datos para la nube
+            nueva_v = {
+                "producto": str(prod),
+                "precio": int(productos[prod]),
+                "cantidad": int(cant),
+                "total": int(productos[prod] * cant),
+                "vendedor": str(st.session_state['usuario'])
+            }
             try:
-                precio = productos[prod]
-                total = precio * cant
-                vendedor = st.session_state['usuario']
-                
-                # ENVIAR A SUPABASE
-                datos_venta = {
-                    "producto": prod,
-                    "precio": precio,
-                    "cantidad": cant,
-                    "total": total,
-                    "vendedor": vendedor
-                }
-                supabase.table("ventas").insert(datos_venta).execute()
-                st.success(f"✅ Venta guardada en la nube!")
+                # AQUÍ es donde ocurre la magia
+                supabase.table("ventas").insert(nueva_v).execute()
+                st.success("¡Venta guardada!")
                 st.rerun()
             except Exception as e:
-                st.error(f"Error al guardar: {e}")
+                st.error("Error al conectar con la tabla. Revisa que se llame 'ventas' en Supabase.")
+                st.write(e)
 
-    st.divider()
-    st.subheader("📊 Historial de Ventas Reales")
-    if not df_ventas.empty:
-        st.dataframe(df_ventas, use_container_width=True)
-        st.metric("RECAUDO TOTAL", f"${df_ventas['total'].sum():,} COP")
-    else:
-        st.info("No hay ventas registradas en la base de datos.")
+    st.subheader("Historial")
+    st.dataframe(df, use_container_width=True)
