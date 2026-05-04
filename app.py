@@ -5,8 +5,8 @@ from supabase import create_client, Client
 
 # --- CONFIGURACIÓN DE SUPABASE ---
 # Asegúrate de que no haya espacios ni puntos extra al final de estas comillas
-SUPABASE_URL = "https://supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imlja2hsZHptb3NucGRrY21sb3p3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc4NzEwMDUsImV4cCI6MjA5MzQ0NzAwNX0.0bRWZKfE7ES_v7AkXP93cXZqN_s7l2pkZolDNnSta5c" # <--- PEGA AQUÍ LA SECRET KEY DE TU FOTO
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]# <--- PEGA AQUÍ LA SECRET KEY DE TU FOTO
 
 # Conexión a la base de datos
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
