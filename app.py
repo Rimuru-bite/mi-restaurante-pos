@@ -1,101 +1,89 @@
-import streamlit as st
+﻿import streamlit as st
 import pandas as pd
 from datetime import datetime
-from supabase import create_client, Client
 
-# --- 1. CONEXIÓN SEGURA ---
-try:
-    # Lee los datos desde los Secrets de Streamlit Cloud
-    url = st.secrets["SUPABASE_URL"].strip().rstrip("/")
-    key = st.secrets["SUPABASE_KEY"].strip()
-    supabase: Client = create_client(url, key)
-except Exception as e:
-    st.error("⚠️ Error: No se encontraron las llaves en los Secrets de Streamlit.")
-    st.stop()
+# 1. Configuración de página
+st.set_page_config(page_title="POS Restaurante Pro", layout="wide")
 
-st.set_page_config(page_title="POS Restaurante - Nube", layout="wide")
-
-# --- 2. FUNCIONES DE BASE DE DATOS ---
-def cargar_ventas():
-    try:
-        # Trae todo de la tabla 'ventas'
-        res = supabase.table("ventas").select("*").execute()
-        return pd.DataFrame(res.data)
-    except Exception as e:
-        # Si falla, devuelve una tabla vacía con tus columnas reales
-        return pd.DataFrame(columns=["created_at", "producto", "precio_venta", "cantidad_vendida", "total_recaudo", "atendido_por"])
-
-# --- 3. LÓGICA DE ACCESO ---
+# 2. Gestión de Sesión (Login)
 if 'autenticado' not in st.session_state:
     st.session_state.update({'autenticado': False, 'rol': None, 'usuario': ""})
 
+def cargar_datos():
+    try:
+        return pd.read_csv("ventas.csv")
+    except:
+        return pd.DataFrame(columns=["Fecha", "Producto", "Precio", "Cantidad", "Total", "Vendedor"])
+
+# --- PANTALLA DE ACCESO ---
 if not st.session_state['autenticado']:
     st.title("🔐 Acceso al Sistema")
-    u = st.text_input("Usuario")
-    p = st.text_input("Contraseña", type="password")
-    if st.button("Ingresar"):
-        if u == "dueño" and p == "admin123":
-            st.session_state.update({"autenticado": True, "rol": "admin", "usuario": u})
-            st.rerun()
-        elif u == "mesero" and p == "venta123":
-            st.session_state.update({"autenticado": True, "rol": "empleado", "usuario": u})
-            st.rerun()
-        else:
-            st.error("Usuario o clave incorrectos")
-else:
-    # --- 4. APLICACIÓN PRINCIPAL ---
-    df_ventas = cargar_ventas()
-    
-    with st.sidebar:
-        st.header(f"👤 {st.session_state['usuario'].capitalize()}")
-        st.write(f"Rol: {st.session_state['rol']}")
-        st.divider()
-        if st.button("Cerrar Sesión"):
-            st.session_state.update({"autenticado": False, "rol": None, "usuario": ""})
-            st.rerun()
-
-    st.title("🚀 Gestión de Ventas (Supabase)")
-
-    # Formulario de Registro
-    with st.expander("📝 Registrar Nueva Venta", expanded=True):
-        menu = {"Corrientazo": 15000, "Gaseosa": 3500, "Jugos": 5000, "Bandeja Paisa": 25000}
-        col1, col2 = st.columns(2)
-        with col1:
-            prod_nombre = st.selectbox("Producto", list(menu.keys()))
-        with col2:
-            cantidad = st.number_input("Cantidad", min_value=1, value=1)
-        
-        if st.button("Confirmar Venta"):
-            try:
-                precio = menu[prod_nombre]
-                total = precio * cantidad
-                
-                # MAPEO EXACTO A TUS COLUMNAS DE SUPABASE
-                datos_supabase = {
-                    "producto": str(prod_nombre),
-                    "precio_venta": int(precio),
-                    "cantidad_vendida": int(cantidad),
-                    "total_recaudo": int(total),
-                    "atendido_por": str(st.session_state['usuario'])
-                }
-                
-                # Insertar en la tabla 'ventas'
-                supabase.table("ventas").insert(datos_supabase).execute()
-                st.success(f"✅ Venta guardada: ${total:,} COP")
+    col_login, _ = st.columns([1, 2])
+    with col_login:
+        user = st.text_input("Usuario")
+        password = st.text_input("Contraseña", type="password")
+        if st.button("Ingresar"):
+            if user == "dueño" and password == "admin123":
+                st.session_state.update({"autenticado": True, "rol": "admin", "usuario": user})
                 st.rerun()
-            except Exception as e:
-                st.error("Error al guardar. Verifica la conexión.")
-                st.write(e)
+            elif user == "mesero" and password == "venta123":
+                st.session_state.update({"autenticado": True, "rol": "mesero", "usuario": user})
+                st.rerun()
+            else:
+                st.error("Credenciales incorrectas")
 
-    # Mostrar Historial
+# --- PANTALLA PRINCIPAL ---
+else:
+    df_ventas = cargar_datos()
+    
+    # Encabezado y Salir
+    col_t, col_b = st.columns([4, 1])
+    with col_t:
+        st.title(f"🚀 Panel de Control - {st.session_state['usuario'].capitalize()}")
+    with col_b:
+        if st.button("Cerrar Sesión"):
+            st.session_state.update({'autenticado': False})
+            st.rerun()
+
+    # --- REGISTRO DE VENTAS ---
+    st.subheader("📝 Registrar Venta")
+    productos = {"Corrientazo": 15000, "Gaseosa": 3500, "Jugos": 5000, "Bandeja Paisa": 25000}
+    
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        prod = st.selectbox("Producto", list(productos.keys()))
+    with c2:
+        cant = st.number_input("Cantidad", min_value=1, value=1)
+    with c3:
+        st.write("") # Espacio
+        st.write("") 
+        if st.button("Confirmar Venta"):
+            total = productos[prod] * cant
+            nueva = pd.DataFrame([[datetime.now().strftime("%H:%M:%S"), prod, productos[prod], cant, total, st.session_state['usuario']]], 
+                                columns=df_ventas.columns)
+            df_ventas = pd.concat([df_ventas, nueva], ignore_index=True)
+            df_ventas.to_csv("ventas.csv", index=False)
+            st.success(f"Venta Guardada: ${total:,}")
+            st.rerun()
+
     st.divider()
-    st.subheader("📊 Historial en Tiempo Real")
+
+    # --- HISTORIAL Y BOTÓN DE BORRAR (Solo Dueño) ---
+    col_h, col_r = st.columns([3, 1])
+    with col_h:
+        st.subheader("📊 Ventas del Día")
+    
+    with col_r:
+        # AQUÍ ESTÁ LA LIBERTAD TOTAL PARA EL DUEÑO
+        if st.session_state['rol'] == "admin":
+            if st.button("🗑️ REINICIAR TODO EL DÍA"):
+                df_ventas = pd.DataFrame(columns=df_ventas.columns)
+                df_ventas.to_csv("ventas.csv", index=False)
+                st.warning("Historial borrado")
+                st.rerun()
+
     if not df_ventas.empty:
-        # Mostramos la tabla formateada
         st.dataframe(df_ventas, use_container_width=True)
-        
-        # Resumen Financiero usando tus nombres de columna
-        recaudo = df_ventas["total_recaudo"].sum()
-        st.metric("TOTAL RECAUDADO (NUBE)", f"${recaudo:,} COP")
+        st.metric("RECAUDO TOTAL", f"${df_ventas['Total'].sum():,} COP")
     else:
-        st.info("No hay registros en la base de datos de Supabase.")
+        st.info("No hay ventas registradas aún.")
