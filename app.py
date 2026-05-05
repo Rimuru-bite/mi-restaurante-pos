@@ -1,103 +1,80 @@
 ﻿import streamlit as st
 import pandas as pd
-from datetime import datetime
 from st_supabase_connection import SupabaseConnection # type: ignore
 
-# 1. Configuración de página
-st.set_page_config(page_title="POS Restaurante Cloud", layout="wide")
-
-# 2. Conexión a Supabase
-# Asegúrate de haber puesto tus credenciales en los "Secrets" de Streamlit Cloud
+st.set_page_config(page_title="POS Multi-Tienda", layout="wide")
 conn = st.connection("supabase", type=SupabaseConnection)
 
-# 3. Gestión de Sesión (Login)
+# --- INICIO DE SESIÓN ---
 if 'autenticado' not in st.session_state:
-    st.session_state.update({'autenticado': False, 'rol': None, 'usuario': ""})
+    st.session_state.update({'autenticado': False, 'usuario': None, 'rol': None, 'tienda_id': None})
 
-# --- PANTALLA DE ACCESO ---
 if not st.session_state['autenticado']:
-    st.title("🔐 Acceso al Sistema")
-    user = st.text_input("Usuario")
-    password = st.text_input("Contraseña", type="password")
+    st.title("🔐 Acceso Multitienda")
+    user_input = st.text_input("Usuario")
+    pass_input = st.text_input("Contraseña", type="password")
+    
     if st.button("Ingresar"):
-        if user == "dueño" and password == "admin123":
-            st.session_state.update({"autenticado": True, "rol": "admin", "usuario": user})
-            st.rerun()
-        elif user == "mesero" and password == "venta123":
-            st.session_state.update({"autenticado": True, "rol": "mesero", "usuario": user})
+        # Buscamos el usuario en la tabla 'usuarios' de Supabase
+        res = conn.table("usuarios").select("*").eq("usuario", user_input).eq("password", pass_input).execute()
+        
+        if res.data:
+            datos = res.data[0]
+            st.session_state.update({
+                'autenticado': True,
+                'usuario': datos['usuario'],
+                'rol': datos['rol'],
+                'tienda_id': datos['tienda_id']
+            })
             st.rerun()
         else:
-            st.error("Credenciales incorrectas")
+            st.error("Usuario o contraseña incorrectos")
 
-# --- PANTALLA PRINCIPAL ---
+# --- PANEL DE VENTAS ---
 else:
-    # Encabezado y Salir
-    col_t, col_b = st.columns([4, 1])
-    with col_t:
-        st.title(f"🚀 Panel - {st.session_state['usuario'].capitalize()}")
-    with col_b:
-        if st.button("Cerrar Sesión"):
-            st.session_state.update({'autenticado': False})
-            st.rerun()
-
-    # --- REGISTRO DE VENTAS ---
-    st.subheader("📝 Registrar Venta")
-    productos = {"Corrientazo": 15000, "Gaseosa": 3500, "Jugos": 5000, "Bandeja Paisa": 25000}
+    tienda = st.session_state['tienda_id']
     
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        prod = st.selectbox("Producto", list(productos.keys()))
-    with c2:
+    st.title(f"🚀 Tienda: {tienda} - Usuario: {st.session_state['usuario']}")
+    
+    if st.sidebar.button("Cerrar Sesión"):
+        st.session_state.update({'autenticado': False})
+        st.rerun()
+
+    # REGISTRAR VENTA (Incluyendo el tienda_id)
+    with st.expander("📝 Registrar Venta"):
+        prod = st.selectbox("Producto", ["Corrientazo", "Gaseosa", "Bandeja Paisa"])
         cant = st.number_input("Cantidad", min_value=1, value=1)
-    with c3:
-        st.write("") # Espacio visual
-        st.write("") 
-        if st.button("Confirmar Venta"):
-            total_venta = productos[prod] * cant
-            
-            # GUARDAR EN SUPABASE
+        if st.button("Confirmar"):
             nueva_venta = {
                 "producto": prod,
-                "precio": productos[prod],
                 "cantidad": cant,
-                "total": total_venta,
-                "vendedor": st.session_state['usuario']
+                "total": 15000 * cant, # Ejemplo
+                "vendedor": st.session_state['usuario'],
+                "tienda_id": tienda  # <--- CRUCIAL: Se guarda con el ID de la tienda
             }
-            
-            try:
-                conn.table("ventas").insert(nueva_venta).execute()
-                st.success(f"✅ Venta en la nube: ${total_venta:,}")
-            except Exception as e:
-                st.error(f"Error al conectar con Supabase: {e}")
+            conn.table("ventas").insert(nueva_venta).execute()
+            st.success("Venta guardada")
 
     st.divider()
 
-    # --- CONSULTAR VENTAS DE LA NUBE ---
-    col_h, col_r = st.columns([3, 1])
-    with col_h:
-        st.subheader("📊 Ventas en Tiempo Real")
+    # MOSTRAR VENTAS (Filtradas por tienda_id)
+    st.subheader("📊 Historial de mi Tienda")
     
-    with col_r:
-        # Solo el dueño puede borrar (en Supabase esto borra todas las filas)
-        if st.session_state['rol'] == "admin":
-            if st.button("🗑️ REINICIAR TODO EL DÍA"):
-                try:
-                    # Borra todas las filas de la tabla ventas
-                    conn.table("ventas").delete().neq("producto", "vacío").execute()
-                    st.warning("Historial borrado de la nube")
-                    st.rerun()
-                except Exception as e:
-                    st.error("No se pudo borrar: Revisa los permisos (RLS) en Supabase")
+    # IMPORTANTE: Solo seleccionamos las filas donde tienda_id coincide
+    res_ventas = conn.table("ventas").select("*").eq("tienda_id", tienda).execute()
+    df = pd.DataFrame(res_ventas.data)
 
-    # Mostrar los datos de la nube
-    try:
-        res = conn.table("ventas").select("*").execute()
-        df_ventas = pd.DataFrame(res.data)
+    if not df.empty:
+        st.dataframe(df, use_container_width=True)
         
-        if not df_ventas.empty:
-            st.dataframe(df_ventas, use_container_width=True)
-            st.metric("RECAUDO TOTAL CLOUD", f"${df_ventas['total'].sum():,} COP")
-        else:
-            st.info("Aún no hay ventas en la base de datos.")
-    except:
-        st.info("Conectando con la base de datos...")
+        # Ver ventas por vendedor (para que el dueño sepa quién generó qué)
+        if st.session_state['rol'] == 'admin':
+            st.write("### 💰 Ventas por Empleado")
+            resumen = df.groupby("vendedor")["total"].sum()
+            st.table(resumen)
+            
+            if st.button("🗑️ Reiniciar mi Tienda"):
+                conn.table("ventas").delete().eq("tienda_id", tienda).execute()
+                st.rerun()
+    else:
+        st.info("No hay ventas en esta tienda.")
