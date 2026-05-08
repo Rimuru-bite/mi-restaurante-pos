@@ -1,98 +1,109 @@
 ﻿import streamlit as st
 import pandas as pd
+import bcrypt
+from datetime import datetime, timedelta
 from st_supabase_connection import SupabaseConnection # type: ignore
 
-st.set_page_config(page_title="POS Restaurante Cloud", layout="wide")
+# CONFIGURACIÓN
+st.set_page_config(page_title="Enterprise POS", layout="wide")
 conn = st.connection("supabase", type=SupabaseConnection)
 
+# --- FUNCIÓN DE VERIFICACIÓN DE CLAVE ---
+def verificar_password(password_plana, hash_almacenado):
+    return bcrypt.checkpw(password_plana.encode('utf-8'), hash_almacenado.encode('utf-8'))
+
+# --- LOGIN ---
 if 'autenticado' not in st.session_state:
     st.session_state.update({'autenticado': False, 'usuario': None, 'rol': None, 'tienda_id': None})
 
-# --- LOGIN ---
 if not st.session_state['autenticado']:
-    st.title("🔐 Acceso")
-    with st.form("login"):
-        u = st.text_input("Usuario")
-        p = st.text_input("Clave", type="password")
-        if st.form_submit_button("Entrar"):
-            res = conn.table("usuarios").select("*").eq("usuario", u).eq("password", p).execute()
-            if res.data:
-                d = res.data[0] # IMPORTANTE: Tomar el primer elemento
-                st.session_state.update({'autenticado': True, 'usuario': d['usuario'], 'rol': d['rol'], 'tienda_id': d['tienda_id']})
-                st.rerun()
-            else:
-                st.error("Error de acceso")
-
-# --- APP PRINCIPAL ---
-else:
-    t_id = st.session_state['tienda_id']
-    st.title(f"🏢 {t_id.replace('_', ' ')}")
-
-    # 1. CARGAR MENÚ
-    res_p = conn.table("productos").select("nombre, precio").eq("tienda_id", t_id).execute()
-    dict_productos = {item['nombre']: item['precio'] for item in res_p.data}
-
-    # --- BARRA LATERAL ---
-    with st.sidebar:
-        st.write(f"Sesión: {st.session_state['usuario']}")
-        if st.button("Cerrar Sesión"):
-            st.session_state.update({'autenticado': False})
+    st.title("🔐 Acceso Empresarial")
+    u = st.text_input("Usuario")
+    p = st.text_input("Contraseña", type="password")
+    if st.button("Ingresar"):
+        res = conn.table("usuarios").select("*").eq("usuario", u).execute()
+        if res.data and verificar_password(p, res.data[0]['password']):
+            d = res.data[0]
+            st.session_state.update({'autenticado': True, 'usuario': u, 'rol': d['rol'], 'tienda_id': d['tienda_id']})
             st.rerun()
-        
-        if st.session_state['rol'] == 'admin':
-            st.divider()
-            st.subheader("🛠️ Ajustar Menú")
-            n_p = st.text_input("Nuevo Producto")
-            p_p = st.number_input("Precio", min_value=0, step=100)
-            if st.button("Guardar Producto"):
-                if n_p:
-                    conn.table("productos").insert({"nombre": n_p, "precio": p_p, "tienda_id": t_id}).execute()
-                    st.rerun()
+        else:
+            st.error("Credenciales incorrectas o usuario no encontrado")
 
-    # --- VENTAS ---
-    if dict_productos:
-        with st.container(border=True):
-            st.subheader("📝 Nueva Venta")
-            c1, c2 = st.columns(2)
-            p_sel = c1.selectbox("Producto", list(dict_productos.keys()))
-            cant = c2.number_input("Cantidad", min_value=1, value=1)
+# --- PANEL DE CONTROL ---
+else:
+    rol = st.session_state['rol']
+    t_id = st.session_state['tienda_id']
+
+    # 1. MÓDULO MESERO (Toma de pedidos)
+    if rol in ['admin', 'mesero']:
+        with st.sidebar:
+            st.header("🍽️ Mesero")
+            # Cargar productos desde Supabase
+            res_p = conn.table("productos").select("*").eq("tienda_id", t_id).execute()
+            productos = {p['nombre']: p['precio'] for p in res_p.data}
             
-            if st.button("🚀 Registrar Venta", use_container_width=True):
-                precio_unitario = dict_productos[p_sel]
-                total_venta = precio_unitario * cant
-                
-                # AHORA SÍ GUARDAMOS EL PRECIO
+            p_sel = st.selectbox("Producto", list(productos.keys()))
+            cant = st.number_input("Cantidad", min_value=1)
+            mesa = st.text_input("Mesa", value="1")
+            if st.button("Enviar Pedido"):
+                total = productos[p_sel] * cant
                 conn.table("ventas").insert({
-                    "producto": p_sel, 
-                    "precio": precio_unitario, # <--- Esto arregla el "None"
-                    "cantidad": cant, 
-                    "total": total_venta, 
-                    "vendedor": st.session_state['usuario'], 
-                    "tienda_id": t_id
+                    "producto": p_sel, "cantidad": cant, "total": total,
+                    "vendedor": st.session_state['usuario'], "tienda_id": t_id,
+                    "estado": "Pendiente", "mesa": mesa
                 }).execute()
-                st.rerun()
-        
-        # --- HISTORIAL Y BOTÓN DE BORRAR ---
+                st.toast("Pedido enviado a cocina! 🍟")
+
+    # 2. MÓDULO COCINA (Solo ve lo pendiente)
+    if rol in ['admin', 'cocina']:
+        st.header("👨‍🍳 Monitor de Cocina")
+        pedidos = conn.table("ventas").select("*").eq("tienda_id", t_id).eq("estado", "Pendiente").execute()
+        if pedidos.data:
+            cols = st.columns(3)
+            for i, ped in enumerate(pedidos.data):
+                with cols[i % 3]:
+                    with st.container(border=True):
+                        st.write(f"**Mesa {ped['mesa']}**")
+                        st.write(f"{ped['producto']} x{ped['cantidad']}")
+                        if st.button("Listo ✅", key=f"p_{ped['id']}"):
+                            conn.table("ventas").update({"estado": "Entregado"}).eq("id", ped['id']).execute()
+                            st.rerun()
+        else:
+            st.info("Sin pedidos pendientes")
+
+    # 3. MÓDULO DUEÑO (Analítica de Valor)
+    if rol == 'admin':
         st.divider()
+        st.header("📈 Reportes Gerenciales")
         res_v = conn.table("ventas").select("*").eq("tienda_id", t_id).execute()
         df = pd.DataFrame(res_v.data)
         
-        col_h, col_b = st.columns([3, 1])
-        with col_h:
-            st.subheader("📊 Historial de hoy")
-        with col_b:
-            # BOTÓN DE BORRAR (Solo Dueño)
-            if st.session_state['rol'] == 'admin' and not df.empty:
-                if st.button("🗑️ Reiniciar Día", type="primary"):
-                    conn.table("ventas").delete().eq("tienda_id", t_id).execute()
-                    st.rerun()
-
         if not df.empty:
-            # Reordenamos columnas para que se vea bonito
-            columnas = ["producto", "precio", "cantidad", "total", "vendedor"]
-            st.dataframe(df[columnas], use_container_width=True)
-            st.metric("TOTAL HOY", f"${df['total'].sum():,} COP")
-        else:
-            st.info("No hay ventas registradas.")
-    else:
-        st.warning("El dueño debe agregar productos primero.")
+            df['creado_en'] = pd.to_datetime(df['creado_en'])
+            hoy = datetime.now().date()
+            
+            # FILTROS DE TIEMPO
+            tab1, tab2, tab3 = st.tabs(["Día", "Semana", "Mes"])
+            
+            with tab1:
+                df_hoy = df[df['creado_en'].dt.date == hoy]
+                st.metric("Venta de Hoy", f"${df_hoy['total'].sum():,} COP")
+                st.dataframe(df_hoy)
+
+            with tab2:
+                hace_semana = hoy - timedelta(days=7)
+                df_sem = df[df['creado_en'].dt.date >= hace_semana]
+                st.line_chart(df_sem.groupby(df_sem['creado_en'].dt.date)['total'].sum())
+
+            # ESTADÍSTICAS PRO
+            st.subheader("🏆 TOP Desempeño")
+            col_a, col_b = st.columns(2)
+            col_a.write("**Producto más vendido:**")
+            col_a.bar_chart(df.groupby('producto')['cantidad'].sum())
+            
+            col_b.write("**Ventas por Empleado:**")
+            col_b.bar_chart(df.groupby('vendedor')['total'].sum())
+
+    if st.sidebar.button("Cerrar Sesión"):
+        st.session_state.update({'autenticado': False})
+        st.rerun()
