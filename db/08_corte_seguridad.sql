@@ -2,6 +2,16 @@
 -- Ejecutar solo cuando la app nueva (Supabase Auth) esté desplegada.
 begin;
 
+-- 8-0. Precondición: debe existir al menos un admin activo vinculado a un usuario de Auth (bloque 07).
+-- Sin él, el corte dejaría a todos sin acceso. Si falla, no se cambia nada.
+do $$
+begin
+  if not exists (select 1 from public.perfiles p join auth.users u on u.id = p.id
+                 where p.rol = 'admin' and p.activo) then
+    raise exception 'Corte cancelado: no hay un admin activo vinculado a Auth. Ejecuta antes el bloque 07.';
+  end if;
+end $$;
+
 -- 8a. Quitar todo y devolver solo lo mínimo
 revoke all on table public.usuarios, public.ventas, public.productos, public.restaurantes,
                     public.perfiles, public.ordenes, public.orden_items, public.auditoria
