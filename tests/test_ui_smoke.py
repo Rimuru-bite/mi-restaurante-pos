@@ -42,6 +42,7 @@ class StubSt(types.ModuleType):
         self.inputs, self.press = {}, set()
         self.errors, self.success, self.frames, self.toasts, self.warnings = [], [], [], [], []
         self.claves = {}
+        self.fragmentos, self.ejecutados, self.expanders = {}, [], []
         self.secrets = {"supabase": {"url": "http://fake", "key": "sb_publishable_fake"}}
         self.sidebar = _Ctx(self)
 
@@ -76,7 +77,15 @@ class StubSt(types.ModuleType):
         raise _Stop()
 
     def fragment(self, *a, **k):
-        return (lambda f: f) if (not a or not callable(a[0])) else a[0]
+        def envolver(f):
+            self.fragmentos[f.__name__] = k.get("run_every")
+
+            def corre(*x, **y):
+                self.ejecutados.append(f.__name__)
+                return f(*x, **y)
+            corre.__name__ = f.__name__
+            return corre
+        return envolver(a[0]) if (a and callable(a[0])) else envolver
 
     # --- contenedores ---
     def columns(self, spec, **k):
@@ -88,7 +97,11 @@ class StubSt(types.ModuleType):
 
     def container(self, *a, **k):
         return _Ctx(self)
-    expander = form = container
+    form = container
+
+    def expander(self, label, *a, **k):
+        self.expanders.append(str(label))
+        return _Ctx(self)
 
     # --- widgets ---
     def text_input(self, label, value="", **k):
@@ -102,7 +115,12 @@ class StubSt(types.ModuleType):
         opciones = list(opciones)
         v = self.inputs.get(label)
         return v if v in opciones else opciones[0]
-    selectbox = radio = _elegir
+    selectbox = _elegir
+
+    def radio(self, label, opciones, **k):
+        if label == "Sección":                      # selector de secciones del mesero: equivale a sus "pestañas"
+            self.tab_names = list(opciones)
+        return self._elegir(label, opciones, **k)
 
     def checkbox(self, label, **k):
         return self.inputs.get(label, False)
@@ -196,7 +214,7 @@ def test_flujo_mesero_envia_orden_y_cocina_la_ve(st_stub, conn):
 
     # el mesero la ve "lista" y la entrega desde su pantalla
     entrar(st_stub, conn, "a2")
-    assert correr(st_stub, press={"✅ Marcar entregada"})
+    assert correr(st_stub, inputs={"Sección": "Mis órdenes"}, press={"✅ Marcar entregada"})
     assert st_stub.errors == []
 
 
@@ -297,3 +315,61 @@ def test_texto_de_equipo_describe_la_clave_temporal(st_stub, conn):
     st_stub.caption = lambda m, *a, **k: captions.append(str(m))
     entrar(st_stub, conn, "a1")
     assert any("clave temporal" in c and "primer ingreso" in c for c in captions)
+
+
+def _cocina_repo(conn):
+    from pos.data import Repo
+    r = Repo(FakeClient(conn))
+    r.login("a3@test.invalid", CLAVE)
+    return r
+
+
+def test_mis_ordenes_se_refresca_sola_y_resalta_las_listas(st_stub, conn):
+    from pos import fechas
+    entrar(st_stub, conn, "a2")
+    repo = st_stub.session_state["repo"]
+    prod = repo.productos()[0]
+    oid = repo.crear_orden("mostrador", None, None, [{"producto_id": prod["id"], "cantidad": 1}])
+    # refresco automático: fragmento con run_every=5, y solo se ejecuta en la sección «Mis órdenes»
+    assert st_stub.fragmentos["mis_ordenes_auto"] == 5
+    st_stub.ejecutados.clear()
+    correr(st_stub, inputs={"Sección": "Nueva orden"})
+    assert "mis_ordenes_auto" not in st_stub.ejecutados
+    st_stub.expanders.clear(); st_stub.success_msgs.clear()
+    correr(st_stub, inputs={"Sección": "Mis órdenes"})
+    assert "mis_ordenes_auto" in st_stub.ejecutados and st_stub.errors == []
+    antes = list(st_stub.expanders)
+    assert not any("LISTA" in e for e in antes) and not any("listo" in m for m in st_stub.success_msgs)
+    # cocina avanza la orden; el siguiente «tick» del refresco la muestra destacada y primera
+    k = _cocina_repo(conn)
+    k.cambiar_estado(oid, "en_preparacion")
+    k.cambiar_estado(oid, "lista")
+    st_stub.expanders.clear(); st_stub.success_msgs.clear()
+    correr(st_stub, inputs={"Sección": "Mis órdenes"})
+    listas = sum(o["estado"] == "lista" for o in repo.ordenes(*fechas.rango("Hoy")))
+    assert listas >= 1
+    assert "LISTA" in st_stub.expanders[0]                                   # las Lista van primero
+    assert sum("LISTA" in e for e in st_stub.expanders) == listas
+    assert sum("listo" in m and "para entregar" in m for m in st_stub.success_msgs) == 1     # un solo aviso fijo, no uno por tick
+    # sin duplicados ni estados alterados por el refresco
+    assert len(st_stub.expanders) == len(antes)
+    estado_antes = {o["id"]: o["estado"] for o in repo.ordenes(*fechas.rango("Hoy"))}
+    for _ in range(3):
+        st_stub.expanders.clear()
+        correr(st_stub, inputs={"Sección": "Mis órdenes"})
+        assert len(st_stub.expanders) == len(antes)                            # mismas órdenes en cada refresco
+    assert {o["id"]: o["estado"] for o in repo.ordenes(*fechas.rango("Hoy"))} == estado_antes
+
+
+def test_boton_manual_actualizar_sigue_funcionando(st_stub, conn):
+    entrar(st_stub, conn, "a2")
+    repo = st_stub.session_state["repo"]
+    repo.crear_orden("mostrador", None, None, [{"producto_id": repo.productos()[0]["id"], "cantidad": 1}])
+    assert correr(st_stub, inputs={"Sección": "Mis órdenes"}, press={"🔄 Actualizar"})    # pide rerun
+
+
+def test_dueno_no_se_ve_afectado_su_pestana_ordenes_no_es_automatica(st_stub, conn):
+    entrar(st_stub, conn, "a1")
+    st_stub.ejecutados.clear()
+    correr(st_stub)
+    assert "mis_ordenes_auto" not in st_stub.ejecutados and "Órdenes" in st_stub.tab_names

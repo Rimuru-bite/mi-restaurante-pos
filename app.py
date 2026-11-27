@@ -148,8 +148,13 @@ def tab_ordenes(repo: Repo):
     if not ordenes:
         st.info("No hay órdenes hoy.")
         return
+    ordenes = sorted(ordenes, key=lambda o: o["estado"] != "lista")        # las Lista primero (el orden anterior se conserva)
+    n_listas = sum(o["estado"] == "lista" for o in ordenes)
+    if n_listas:
+        st.success(f"🔔 {n_listas} pedido{'s' if n_listas > 1 else ''} listo{'s' if n_listas > 1 else ''} para entregar")
     for o in ordenes:
-        titulo = f'{ESTADOS[o["estado"]]} · {"Mesa " + o["mesa"] if o["tipo"] == "mesa" else "Mostrador"} · {cop(o["total"])}'
+        estado = ESTADOS[o["estado"]] if o["estado"] != "lista" else "🟢 **¡LISTA PARA ENTREGAR!**"
+        titulo = f'{estado} · {"Mesa " + o["mesa"] if o["tipo"] == "mesa" else "Mostrador"} · {cop(o["total"])}'
         with st.expander(titulo, expanded=o["estado"] in ("enviada", "en_preparacion", "lista")):
             hora = pd.to_datetime(o["creado_en"], utc=True).tz_convert(fechas.TZ).strftime("%H:%M")
             st.caption(f'{hora} · {o["mesero"] or "—"}' + (f' · {o["notas"]}' if o["notas"] else ""))
@@ -170,6 +175,12 @@ def tab_ordenes(repo: Repo):
                     ok, _ = seguro(lambda n=nuevo: repo.cambiar_estado(o["id"], n))
                     if ok:
                         st.rerun()
+
+
+@st.fragment(run_every=5)
+def mis_ordenes_auto(repo: Repo):
+    """«Mis órdenes» del mesero: se refresca sola cada 5 s. Solo existe mientras esa sección está seleccionada."""
+    tab_ordenes(repo)
 
 
 # ======================================================================= COCINA
@@ -349,10 +360,17 @@ def pantalla_app(repo: Repo):
             st.rerun()
     st.title(f'🍽️ {p["tienda_nombre"]}')
 
+    if p["rol"] == "mesero":
+        vista = st.radio("Sección", ["Nueva orden", "Mis órdenes"], horizontal=True, label_visibility="collapsed", key="vista_mesero")
+        try:
+            (tab_nueva_orden if vista == "Nueva orden" else mis_ordenes_auto)(repo)
+        except ErrorApp as e:
+            st.error(str(e))
+        return
+
     pantallas = {
         "admin": [("Nueva orden", tab_nueva_orden), ("Órdenes", tab_ordenes), ("Cocina", tab_cocina), ("Resumen", tab_resumen),
                   ("Historial", tab_historial), ("Menú", tab_menu), ("Equipo", tab_equipo), ("Auditoría", tab_auditoria)],
-        "mesero": [("Nueva orden", tab_nueva_orden), ("Mis órdenes", tab_ordenes)],
         "cocina": [("Cocina", tab_cocina)],
     }.get(p["rol"], [])
     if not pantallas:
