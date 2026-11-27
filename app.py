@@ -118,6 +118,7 @@ def tab_nueva_orden(repo: Repo):
     por_nombre = {f'{p["nombre"]} · {cop(p["precio"])}': p for p in productos}
     carrito = st.session_state.setdefault("carrito", [])
     gen = st.session_state.setdefault("orden_gen", 0)       # sube al enviar una orden: los campos del pedido anterior no pasan al siguiente
+    item_gen = st.session_state.setdefault("item_gen", 0)   # sube al agregar un ítem: su observación no pasa al siguiente
 
     c1, c2 = st.columns(2)
     tipo = c1.radio("Servicio", ["Mesa", "Mostrador"], horizontal=True, key="orden_tipo")
@@ -143,11 +144,12 @@ def tab_nueva_orden(repo: Repo):
         a, b, c = st.columns([3, 1, 3])
         sel = a.selectbox("Producto", list(por_nombre.keys()), key="orden_prod")
         cant = b.number_input("Cantidad", min_value=1, max_value=99, value=1, key="orden_cant")
-        nota = c.text_input("Observación (opcional)", key=f"orden_nota_{gen}", max_chars=200)
+        nota = c.text_input("Observación (opcional)", key=f"orden_nota_{gen}_{item_gen}", max_chars=200)
         if st.button("➕ Agregar"):
             p = por_nombre[sel]
             carrito.append({"producto_id": p["id"], "nombre": p["nombre"], "precio": p["precio"],
                             "cantidad": int(cant), "nota": nota.strip()})
+            st.session_state["item_gen"] = item_gen + 1
             st.rerun()
 
     if carrito:
@@ -343,11 +345,15 @@ def tab_resumen(repo: Repo):
     ventas = repo.ventas(desde, hasta, incluir_archivados=True)      # los reportes incluyen lo archivado
     ordenes = repo.ordenes(desde, hasta, incluir_archivados=True, con_items=False)
     r = reportes.resumen(ventas, ordenes)
-    a, b, c, d = st.columns(4)
-    a.metric("Total", cop(r["total"]))
-    b.metric("Órdenes", f'{r["n_ordenes"]} · {cop(r["ordenes"])}')
+    pend = reportes.pendientes(ordenes)
+    a, b, c, d, e = st.columns(5)
+    a.metric("Total vendido", cop(r["total"]))
+    b.metric("Órdenes entregadas", f'{r["n_ordenes"]} · {cop(r["ordenes"])}')
     c.metric("Ventas rápidas", f'{r["n_ventas"]} · {cop(r["ventas_rapidas"])}')
-    d.metric("Anuladas", r["anuladas"])
+    d.metric("Pendientes", f'{pend["n"]} · {cop(pend["total"])}')
+    e.metric("Anuladas", r["anuladas"])
+    st.caption("Una orden cuenta como vendida al entregarse; las pendientes no suman hasta entonces. "
+               "La app no registra cobros: «vendido» no equivale a dinero cobrado.")
     df = reportes.por_dia(ventas, ordenes)
     if df.empty:
         st.info("Sin movimientos en este periodo.")
@@ -498,6 +504,14 @@ def pantalla_app(repo: Repo):
     }.get(p["rol"], [])
     if not pantallas:
         st.error("Tu rol no tiene pantallas asignadas.")
+        return
+    if len(pantallas) > 1:               # varias secciones: solo se ejecuta (y consulta) la elegida
+        vista = st.radio("Sección", [n for n, _ in pantallas], horizontal=True, label_visibility="collapsed",
+                         key=f'vista_{p["rol"]}')
+        try:
+            dict(pantallas)[vista](repo)
+        except ErrorApp as e:
+            mostrar_error(e)
         return
     for tab, (_, fn) in zip(st.tabs([n for n, _ in pantallas]), pantallas):
         with tab:

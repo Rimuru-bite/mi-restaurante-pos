@@ -16,11 +16,15 @@ def _fecha(serie):
     return pd.to_datetime(serie, utc=True, format="ISO8601").dt.tz_convert(TZ).dt.date
 
 
+PENDIENTES = ("enviada", "en_preparacion", "lista")
+
+
 def resumen(ventas: list[dict], ordenes: list[dict]) -> dict:
-    """Totales del periodo. Las órdenes anuladas no suman."""
+    """Ventas realizadas del periodo: ventas rápidas + órdenes ENTREGADAS.
+    Las pendientes (enviada, en preparación, lista) y las anuladas no suman. No es dinero cobrado: la app no registra cobros."""
     v = _df(ventas, ["total"])
     o = _df(ordenes, ["total", "estado"])
-    o_ok = o[o["estado"] != "anulada"] if len(o) else o
+    o_ok = o[o["estado"] == "entregada"] if len(o) else o
     tv = int(v["total"].sum()) if len(v) else 0
     to = int(o_ok["total"].sum()) if len(o_ok) else 0
     return {
@@ -31,15 +35,22 @@ def resumen(ventas: list[dict], ordenes: list[dict]) -> dict:
     }
 
 
+def pendientes(ordenes: list[dict]) -> dict:
+    """Órdenes aún no entregadas (enviada, en preparación, lista): se muestran aparte y no cuentan como venta."""
+    o = _df(ordenes, ["total", "estado"])
+    p = o[o["estado"].isin(PENDIENTES)] if len(o) else o
+    return {"n": len(p), "total": int(p["total"].sum()) if len(p) else 0}
+
+
 def por_dia(ventas: list[dict], ordenes: list[dict]) -> pd.DataFrame:
-    """Una fila por día: ventas rápidas, órdenes y total."""
+    """Una fila por día: ventas rápidas, órdenes entregadas y total (mismo criterio que resumen)."""
     v = _df(ventas, ["creado_en", "total"])
     o = _df(ordenes, ["creado_en", "total", "estado"])
     partes = []
     if len(v):
         partes.append(pd.DataFrame({"fecha": _fecha(v["creado_en"]), "ventas_rapidas": v["total"].astype("int64"), "ordenes": 0}))
     if len(o):
-        o = o[o["estado"] != "anulada"]
+        o = o[o["estado"] == "entregada"]
         if len(o):
             partes.append(pd.DataFrame({"fecha": _fecha(o["creado_en"]), "ventas_rapidas": 0, "ordenes": o["total"].astype("int64")}))
     if not partes:

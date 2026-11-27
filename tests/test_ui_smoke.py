@@ -45,13 +45,17 @@ class StubSt(types.ModuleType):
         self.fragmentos, self.ejecutados, self.expanders = {}, [], []
         self.md, self.col_specs = [], []
         self.captions, self.botones = [], []
+        self.metricas = {}
         self.secrets = {"supabase": {"url": "http://fake", "key": "sb_publishable_fake"}}
         self.sidebar = _Ctx(self)
 
     # --- salida ---
     def _noop(self, *a, **k):
         return None
-    set_page_config = title = subheader = write = info = divider = metric = bar_chart = _noop
+    set_page_config = title = subheader = write = info = divider = bar_chart = _noop
+
+    def metric(self, label, value, *a, **k):
+        self.metricas[label] = str(value)
 
     def caption(self, m, *a, **k):
         self.captions.append(str(m))
@@ -230,14 +234,14 @@ def test_flujo_mesero_envia_orden_y_cocina_la_ve(st_stub, conn):
 
 def test_dueno_opera_menu_equipo_y_archivo(st_stub, conn):
     entrar(st_stub, conn, "a1")
-    assert correr(st_stub, inputs={"Nombre": "Jugo", "Precio (COP)": 3000}, press={"Guardar"})
+    assert correr(st_stub, inputs={"Sección": "Menú", "Nombre": "Jugo", "Precio (COP)": 3000}, press={"Guardar"})
     assert st_stub.errors == [] and any("Producto creado" in t for t in st_stub.toasts)
     correr(st_stub, press={"Guardar"}, inputs={"Nombre": "Jugo", "Precio (COP)": 3000})        # duplicado → error amigable
     assert st_stub.errors
-    correr(st_stub, press={"Vincular"}, inputs={"Correo del empleado": "nadie@test.invalid", "Nombre a mostrar (ej. Ana)": "Zoe"})
+    correr(st_stub, press={"Vincular"}, inputs={"Sección": "Equipo", "Correo del empleado": "nadie@test.invalid", "Nombre a mostrar (ej. Ana)": "Zoe"})
     assert st_stub.errors and "Authentication" in st_stub.errors[0]
     # archivar exige confirmar
-    correr(st_stub, press={"🗂️ Archivar y reiniciar el día"})
+    correr(st_stub, inputs={"Sección": "Historial"}, press={"🗂️ Archivar y reiniciar el día"})
     assert not any("Archivadas" in m for m in st_stub.success_msgs)
     assert correr(st_stub, press={"🗂️ Archivar y reiniciar el día"}, inputs={"Entiendo que se ocultarán las órdenes terminadas y las ventas actuales": True}) is False
     assert any("Archivadas" in m for m in st_stub.success_msgs) and st_stub.errors == []
@@ -309,7 +313,7 @@ def test_historial_muestra_fechas_y_estados_legibles(st_stub, conn):
     repo.cambiar_estado(next(o["id"] for o in repo.ordenes() if o["estado"] == "enviada"), "en_preparacion")
     repo.venta_rapida(prod["nombre"], prod["precio"], 1)
     st_stub.frames.clear()
-    correr(st_stub)
+    correr(st_stub, inputs={"Sección": "Historial"})
     ordenes = next(f for f in st_stub.frames if "servicio" in f.columns)
     ventas = next(f for f in st_stub.frames if "vendedor" in f.columns and "creado_en" in f.columns)
     assert set(ordenes["estado"]) <= set(sys.modules["app"].ESTADOS.values()) and "🟠 En preparación" in set(ordenes["estado"])
@@ -324,6 +328,7 @@ def test_texto_de_equipo_describe_la_clave_temporal(st_stub, conn):
     captions = []
     st_stub.caption = lambda m, *a, **k: captions.append(str(m))
     entrar(st_stub, conn, "a1")
+    correr(st_stub, inputs={"Sección": "Equipo"})
     assert any("clave temporal" in c and "primer ingreso" in c for c in captions)
 
 
@@ -719,3 +724,78 @@ def test_t6_config_oculta_detalles_tecnicos():
     import tomllib
     cfg = tomllib.loads((pathlib.Path(__file__).parent.parent / ".streamlit" / "config.toml").read_text(encoding="utf-8"))
     assert cfg["client"]["showErrorDetails"] is False
+
+
+# ---------------------------------------------------------------- TAREA 7: RESUMEN, NAVEGACIÓN Y OBSERVACIONES
+def test_t7_reportes_solo_entregadas_y_pendientes_aparte():
+    from pos import reportes
+    ordenes = [{"creado_en": "2026-11-24T15:00:00+00:00", "total": 5000, "estado": "entregada"},
+               {"creado_en": "2026-11-24T15:10:00+00:00", "total": 1000, "estado": "enviada"},
+               {"creado_en": "2026-11-24T15:20:00+00:00", "total": 2000, "estado": "en_preparacion"},
+               {"creado_en": "2026-11-24T15:30:00+00:00", "total": 3000, "estado": "lista"},
+               {"creado_en": "2026-11-24T16:00:00+00:00", "total": 7000, "estado": "anulada"}]
+    ventas = [{"creado_en": "2026-11-24T17:00:00+00:00", "total": 800}]
+    r = reportes.resumen(ventas, ordenes)
+    assert (r["ordenes"], r["n_ordenes"], r["anuladas"], r["total"]) == (5000, 1, 1, 5800)     # solo entregadas + ventas rápidas
+    assert reportes.pendientes(ordenes) == {"n": 3, "total": 6000}
+    df = reportes.por_dia(ventas, ordenes)
+    assert int(df["ordenes"].sum()) == r["ordenes"] and int(df["total"].sum()) == r["total"]  # mismo criterio por día
+    assert reportes.pendientes([]) == {"n": 0, "total": 0}
+
+
+def test_t7_resumen_en_pantalla_separa_pendientes_y_aclara_cobros(st_stub, conn):
+    from pos import fechas, reportes
+    entrar(st_stub, conn, "a1")
+    repo = st_stub.session_state["repo"]
+    captions = []
+    st_stub.caption = lambda m, *a, **k: captions.append(str(m))
+    st_stub.metricas.clear()
+    correr(st_stub, inputs={"Sección": "Resumen", "Periodo": "Hoy"})
+    desde, hasta = fechas.rango("Hoy")
+    ords = repo.ordenes(desde, hasta, True, False)
+    r, p = reportes.resumen(repo.ventas(desde, hasta, True), ords), reportes.pendientes(ords)
+    m = st_stub.metricas
+    assert m["Total vendido"] == app_cop(r["total"]) and m["Pendientes"] == f'{p["n"]} · {app_cop(p["total"])}'
+    assert "Órdenes entregadas" in m and "Anuladas" in m
+    assert any("no registra cobros" in c for c in captions)
+
+
+def app_cop(x):
+    return sys.modules["app"].cop(x)
+
+
+def test_t7_dueno_solo_consulta_la_seccion_elegida_y_cocina_no_refresca_oculta(st_stub, conn):
+    entrar(st_stub, conn, "a1")
+    repo = st_stub.session_state["repo"]
+    tablas, t0, r0 = [], repo.c.table, repo.c.rpc
+    repo.c.table = lambda n: (tablas.append(n), t0(n))[1]
+    repo.c.rpc = lambda n, p=None: (tablas.append("rpc:" + n), r0(n, p))[1]
+    st_stub.ejecutados.clear()
+    correr(st_stub, inputs={"Sección": "Menú"})
+    assert set(tablas) <= {"perfiles", "productos"}, tablas                       # nada de órdenes, ventas, auditoría ni cocina
+    assert "tab_cocina" not in st_stub.ejecutados
+    tablas.clear()
+    correr(st_stub, inputs={"Sección": "Cocina"})
+    assert "tab_cocina" in st_stub.ejecutados and "rpc:tablero_cocina" in tablas
+    assert "auditoria" not in tablas and "ventas" not in tablas
+    assert st_stub.tab_names == ["Nueva orden", "Órdenes", "Cocina", "Resumen", "Historial", "Menú", "Equipo", "Auditoría"]
+
+
+def test_t7_cocina_sigue_igual_con_una_sola_seccion(st_stub, conn):
+    entrar(st_stub, conn, "a3")
+    st_stub.ejecutados.clear()
+    correr(st_stub)
+    assert "tab_cocina" in st_stub.ejecutados and st_stub.tab_names == ["Cocina"]
+
+
+def test_t7_la_observacion_queda_solo_en_su_item(st_stub, conn):
+    entrar(st_stub, conn, "a2")
+    st_stub.session_state["carrito"] = []
+    sel = {"Sección": "Nueva orden", "Servicio": "Mostrador", "Producto": "Gaseosa · $1.500 COP", "Cantidad": 1}
+    correr(st_stub, inputs={**sel, "Observación (opcional)": "sin hielo"}, press={"➕ Agregar"})
+    clave1 = st_stub.claves["Observación (opcional)"]
+    correr(st_stub, inputs=sel)
+    clave2 = st_stub.claves["Observación (opcional)"]
+    assert clave2 != clave1                                                       # el campo nace vacío para el siguiente ítem
+    correr(st_stub, inputs={**sel, "Observación (opcional)": ""}, press={"➕ Agregar"})
+    assert [c["nota"] for c in st_stub.session_state["carrito"]] == ["sin hielo", ""]
