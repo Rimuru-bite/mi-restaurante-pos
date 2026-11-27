@@ -17,6 +17,13 @@ def cop(x) -> str:
     return f"${int(x or 0):,} COP".replace(",", ".")
 
 
+def fmt_fecha(v) -> str:
+    """Fecha local legible (AAAA-MM-DD HH:MM) o vacío si no hay fecha."""
+    if not v:
+        return ""
+    return pd.to_datetime(v, utc=True).tz_convert(fechas.TZ).strftime("%Y-%m-%d %H:%M")
+
+
 def seguro(fn, ok=None):
     """Ejecuta una acción y muestra el error de forma amigable. Devuelve (hecho, resultado)."""
     try:
@@ -78,16 +85,17 @@ def tab_nueva_orden(repo: Repo):
         return
     por_nombre = {f'{p["nombre"]} · {cop(p["precio"])}': p for p in productos}
     carrito = st.session_state.setdefault("carrito", [])
+    gen = st.session_state.setdefault("orden_gen", 0)       # sube al enviar una orden: los campos del pedido anterior no pasan al siguiente
 
     c1, c2 = st.columns(2)
     tipo = c1.radio("Servicio", ["Mesa", "Mostrador"], horizontal=True, key="orden_tipo")
-    mesa = c2.text_input("Mesa", key="orden_mesa", disabled=(tipo == "Mostrador"), max_chars=30)
+    mesa = c2.text_input("Mesa", key=f"orden_mesa_{gen}", disabled=(tipo == "Mostrador"), max_chars=30)
 
     with st.container(border=True):
         a, b, c = st.columns([3, 1, 3])
         sel = a.selectbox("Producto", list(por_nombre.keys()), key="orden_prod")
         cant = b.number_input("Cantidad", min_value=1, max_value=99, value=1, key="orden_cant")
-        nota = c.text_input("Observación (opcional)", key="orden_nota", max_chars=200)
+        nota = c.text_input("Observación (opcional)", key=f"orden_nota_{gen}", max_chars=200)
         if st.button("➕ Agregar"):
             p = por_nombre[sel]
             carrito.append({"producto_id": p["id"], "nombre": p["nombre"], "precio": p["precio"],
@@ -106,7 +114,7 @@ def tab_nueva_orden(repo: Repo):
                 carrito.pop(i)
                 st.rerun()
         st.metric("Total", cop(total))
-        notas = st.text_input("Notas generales de la orden (opcional)", key="orden_notas", max_chars=300)
+        notas = st.text_input("Notas generales de la orden (opcional)", key=f"orden_notas_{gen}", max_chars=300)
         e1, e2 = st.columns(2)
         if e1.button("🚀 Enviar a cocina", type="primary"):
             if tipo == "Mesa" and not mesa.strip():
@@ -116,6 +124,7 @@ def tab_nueva_orden(repo: Repo):
                                "Orden enviada a cocina")
                 if ok:
                     st.session_state["carrito"] = []
+                    st.session_state["orden_gen"] = gen + 1
                     st.rerun()
         if e2.button("Vaciar"):
             st.session_state["carrito"] = []
@@ -226,7 +235,7 @@ def tab_historial(repo: Repo):
     if ordenes:
         df_o = pd.DataFrame([{
             "fecha": pd.to_datetime(o["creado_en"], utc=True).tz_convert(fechas.TZ).strftime("%Y-%m-%d %H:%M"),
-            "servicio": ("Mesa " + o["mesa"]) if o["tipo"] == "mesa" else "Mostrador", "estado": o["estado"],
+            "servicio": ("Mesa " + o["mesa"]) if o["tipo"] == "mesa" else "Mostrador", "estado": ESTADOS.get(o["estado"], o["estado"]),
             "mesero": o["mesero"], "productos": "; ".join(f'{i["cantidad"]}x {i["producto"]}' for i in o.get("items", [])),
             "total": o["total"], "archivada": o["archivado_en"] is not None} for o in ordenes])
         st.dataframe(df_o)
@@ -236,6 +245,8 @@ def tab_historial(repo: Repo):
     st.subheader("Ventas rápidas")
     if ventas:
         df_v = pd.DataFrame(ventas)[["creado_en", "producto", "precio", "cantidad", "total", "vendedor", "archivado_en"]]
+        df_v["creado_en"] = df_v["creado_en"].map(fmt_fecha)
+        df_v["archivado_en"] = df_v["archivado_en"].map(fmt_fecha)
         st.dataframe(df_v)
         st.download_button("⬇️ Descargar ventas (CSV)", reportes.a_csv(df_v), "ventas.csv", "text/csv")
     else:
@@ -284,8 +295,10 @@ def tab_equipo(repo: Repo):
     if emp:
         st.dataframe(pd.DataFrame(emp)[["usuario", "rol", "activo"]])
     st.subheader("Agregar empleado")
-    st.caption("1) Crea su usuario en Supabase → Authentication → Users → Add user (correo y clave propios, sin cuentas compartidas). "
-               "2) Vincúlalo aquí a tu restaurante.")
+    st.caption("1) Crea su usuario en Supabase → Authentication → Users → Add user, con su correo y una clave temporal "
+               "(marca «Auto Confirm User»); una cuenta por persona, sin cuentas compartidas. Entrégale la clave temporal en persona. "
+               "2) Vincúlalo aquí a tu restaurante. "
+               "3) En su primer ingreso la app le pedirá crear su propia clave; la temporal deja de servir.")
     with st.form("vincular", clear_on_submit=True):
         email = st.text_input("Correo del empleado")
         usuario = st.text_input("Nombre a mostrar (ej. Ana)")

@@ -41,6 +41,7 @@ class StubSt(types.ModuleType):
         self.session_state = {}
         self.inputs, self.press = {}, set()
         self.errors, self.success, self.frames, self.toasts, self.warnings = [], [], [], [], []
+        self.claves = {}
         self.secrets = {"supabase": {"url": "http://fake", "key": "sb_publishable_fake"}}
         self.sidebar = _Ctx(self)
 
@@ -91,6 +92,7 @@ class StubSt(types.ModuleType):
 
     # --- widgets ---
     def text_input(self, label, value="", **k):
+        self.claves[label] = k.get("key")          # última clave de widget usada por etiqueta
         return self.inputs.get(label, value)
 
     def number_input(self, label, min_value=None, max_value=None, value=None, **k):
@@ -251,3 +253,47 @@ def test_menu_vacio_con_cuenta_activa_conserva_su_aviso(st_stub, conn):
     entrar(st_stub, conn, "vacio")
     assert any("Todavía no hay productos" in str(m) for m in st_stub.warnings)
     assert "repo" in st_stub.session_state                         # sigue dentro: no es una cuenta desactivada
+
+
+def test_pedido_nuevo_no_hereda_mesa_ni_observacion_del_anterior(st_stub, conn):
+    entrar(st_stub, conn, "a2")
+    correr(st_stub, inputs={"Producto": "Gaseosa · $1.500 COP", "Cantidad": 1, "Observación (opcional)": "con hielo"}, press={"➕ Agregar"})
+    clave_mesa, clave_obs = st_stub.claves["Mesa"], st_stub.claves["Observación (opcional)"]
+    gen = st_stub.session_state["orden_gen"]
+    # envío fallido (sin mesa): NO se reinician los campos
+    correr(st_stub, inputs={"Mesa": ""}, press={"🚀 Enviar a cocina"})
+    assert st_stub.errors == ["Indica el número de mesa."]
+    assert st_stub.session_state["orden_gen"] == gen and st_stub.claves["Mesa"] == clave_mesa
+    assert st_stub.session_state["carrito"]                                   # el carrito sigue intacto
+    # envío correcto: la generación sube y Mesa/Observación nacen con claves nuevas (vacías)
+    assert correr(st_stub, inputs={"Mesa": "9"}, press={"🚀 Enviar a cocina"})
+    assert st_stub.errors == [] and st_stub.session_state["carrito"] == []
+    assert st_stub.session_state["orden_gen"] == gen + 1
+    correr(st_stub)
+    assert st_stub.claves["Mesa"] != clave_mesa and st_stub.claves["Observación (opcional)"] != clave_obs
+
+
+def test_historial_muestra_fechas_y_estados_legibles(st_stub, conn):
+    entrar(st_stub, conn, "a1")
+    repo = st_stub.session_state["repo"]
+    prod = repo.productos()[0]
+    repo.crear_orden("mostrador", None, None, [{"producto_id": prod["id"], "cantidad": 1}])
+    repo.cambiar_estado(next(o["id"] for o in repo.ordenes() if o["estado"] == "enviada"), "en_preparacion")
+    repo.venta_rapida(prod["nombre"], prod["precio"], 1)
+    st_stub.frames.clear()
+    correr(st_stub)
+    ordenes = next(f for f in st_stub.frames if "servicio" in f.columns)
+    ventas = next(f for f in st_stub.frames if "vendedor" in f.columns and "creado_en" in f.columns)
+    assert set(ordenes["estado"]) <= set(sys.modules["app"].ESTADOS.values()) and "🟠 En preparación" in set(ordenes["estado"])
+    assert not any("_" in e for e in ordenes["estado"])                        # nada de en_preparacion
+    import re
+    for col in ("creado_en", "archivado_en"):
+        assert all(re.fullmatch(r"(\d{4}-\d\d-\d\d \d\d:\d\d)?", v) for v in ventas[col]), col   # sin ISO crudo (T ni zona)
+    assert ventas["creado_en"].iloc[0] != ""
+
+
+def test_texto_de_equipo_describe_la_clave_temporal(st_stub, conn):
+    captions = []
+    st_stub.caption = lambda m, *a, **k: captions.append(str(m))
+    entrar(st_stub, conn, "a1")
+    assert any("clave temporal" in c and "primer ingreso" in c for c in captions)
