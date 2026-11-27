@@ -544,3 +544,57 @@ def test_dueno_y_cocina_no_tienen_franja_de_mesero(st_stub, conn):
         st_stub.ejecutados.clear()
         correr(st_stub)
         assert "avisos_listos" not in st_stub.ejecutados, u
+
+
+# ---------------------------------------------------------------- MOSTRADOR Y TOMA RÁPIDA
+def _ultima_orden(conn, mesero="ana"):
+    return conn.admin("select tipo||'|'||coalesce(mesa,'<null>')||'|'||total||'|'||"
+                      "(select string_agg(cantidad||'x'||producto, ',') from public.orden_items i where i.orden_id = o.id) "
+                      f"from public.ordenes o where mesero = '{mesero}' order by creado_en desc limit 1").strip()
+
+
+def test_mostrador_con_referencia_toque_rapido_y_cantidades_llega_a_cocina(st_stub, conn):
+    entrar(st_stub, conn, "a2")
+    repo = st_stub.session_state["repo"]
+    gaseosa = next(p for p in repo.productos() if p["nombre"] == "Gaseosa")
+    st_stub.session_state["carrito"] = []
+    sel = {"Servicio": "Mostrador", "Sección": "Nueva orden"}
+    assert correr(st_stub, inputs=sel, press={f"rapido_{gaseosa['id']}"})
+    assert correr(st_stub, inputs=sel, press={f"rapido_{gaseosa['id']}"})                # suma a la misma línea
+    carrito = st_stub.session_state["carrito"]
+    assert [(c["nombre"], c["cantidad"]) for c in carrito] == [("Gaseosa", 2)]
+    assert correr(st_stub, inputs=sel, press={"mas_0"}) and carrito[0]["cantidad"] == 3
+    assert correr(st_stub, inputs=sel, press={"menos_0"}) and carrito[0]["cantidad"] == 2
+    assert st_stub.claves.get("Cliente o turno (opcional)", "").startswith("orden_ref_")        # en Mostrador se pide cliente o turno
+    assert correr(st_stub, inputs={**sel, "Cliente o turno (opcional)": " Turno 5 "}, press={"🚀 Enviar a cocina"})
+    assert st_stub.errors == [] and st_stub.session_state["carrito"] == []
+    assert _ultima_orden(conn) == f"mostrador|Turno 5|{2 * gaseosa['precio']}|2xGaseosa"     # precio del servidor
+    # cocina la ve como «Mostrador · Turno 5»
+    entrar(st_stub, conn, "a3")
+    st_stub.md.clear()
+    correr(st_stub)
+    assert "## Mostrador · Turno 5" in st_stub.md
+
+
+def test_mostrador_sin_referencia_no_envia_mesa_aunque_se_haya_escrito(st_stub, conn):
+    entrar(st_stub, conn, "a2")
+    repo = st_stub.session_state["repo"]
+    prod = repo.productos()[0]
+    st_stub.session_state["carrito"] = []
+    # escribe una mesa y luego cambia a Mostrador: la mesa NO debe viajar
+    correr(st_stub, inputs={"Sección": "Nueva orden", "Servicio": "Mesa", "Mesa": "9"}, press={f"rapido_{prod['id']}"})
+    assert correr(st_stub, inputs={"Servicio": "Mostrador", "Cliente o turno (opcional)": ""}, press={"🚀 Enviar a cocina"})
+    assert st_stub.errors == []
+    assert _ultima_orden(conn).startswith("mostrador|<null>|")
+
+
+def test_menos_hasta_cero_quita_la_linea_y_mesa_sigue_exigiendo_numero(st_stub, conn):
+    entrar(st_stub, conn, "a2")
+    prod = st_stub.session_state["repo"].productos()[0]
+    st_stub.session_state["carrito"] = []
+    sel = {"Sección": "Nueva orden", "Servicio": "Mesa", "Mesa": ""}
+    correr(st_stub, inputs=sel, press={f"rapido_{prod['id']}"})
+    assert correr(st_stub, inputs=sel, press={"menos_0"}) and st_stub.session_state["carrito"] == []
+    correr(st_stub, inputs=sel, press={f"rapido_{prod['id']}"})
+    correr(st_stub, inputs=sel, press={"🚀 Enviar a cocina"})
+    assert st_stub.errors == ["Indica el número de mesa."]                               # Mesa sin número no se envía

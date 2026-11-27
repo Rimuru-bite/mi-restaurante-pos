@@ -26,6 +26,13 @@ def fmt_fecha(v) -> str:
     return pd.to_datetime(v, utc=True).tz_convert(fechas.TZ).strftime("%Y-%m-%d %H:%M")
 
 
+def servicio(o: dict) -> str:
+    """Cómo se nombra el servicio de una orden: «Mesa 7», «Mostrador» o «Mostrador · Ana» (referencia opcional)."""
+    if o["tipo"] == "mesa":
+        return f'Mesa {o["mesa"]}'
+    return f'Mostrador · {o["mesa"]}' if o.get("mesa") else "Mostrador"
+
+
 def seguro(fn, ok=None):
     """Ejecuta una acción y muestra el error de forma amigable. Devuelve (hecho, resultado)."""
     try:
@@ -91,7 +98,23 @@ def tab_nueva_orden(repo: Repo):
 
     c1, c2 = st.columns(2)
     tipo = c1.radio("Servicio", ["Mesa", "Mostrador"], horizontal=True, key="orden_tipo")
-    mesa = c2.text_input("Mesa", key=f"orden_mesa_{gen}", disabled=(tipo == "Mostrador"), max_chars=30)
+    if tipo == "Mesa":
+        mesa = c2.text_input("Mesa", key=f"orden_mesa_{gen}", max_chars=30)
+        destino = mesa.strip()
+    else:                                   # Mostrador: sin mesa; nombre del cliente o turno opcional
+        destino = c2.text_input("Cliente o turno (opcional)", key=f"orden_ref_{gen}", max_chars=30).strip()
+
+    # Toma rápida: un toque agrega 1 unidad (o suma a la línea igual sin observación)
+    st.caption("Toque rápido: cada toque suma 1")
+    rapidos = st.columns(3)
+    for i, p in enumerate(productos):
+        if rapidos[i % 3].button(f'{p["nombre"]} · {cop(p["precio"])}', key=f'rapido_{p["id"]}'):
+            linea = next((it for it in carrito if it["producto_id"] == p["id"] and not it["nota"]), None)
+            if linea:
+                linea["cantidad"] = min(99, linea["cantidad"] + 1)
+            else:
+                carrito.append({"producto_id": p["id"], "nombre": p["nombre"], "precio": p["precio"], "cantidad": 1, "nota": ""})
+            st.rerun()
 
     with st.container(border=True):
         a, b, c = st.columns([3, 1, 3])
@@ -110,8 +133,16 @@ def tab_nueva_orden(repo: Repo):
         for i, it in enumerate(carrito):
             sub = it["precio"] * it["cantidad"]
             total += sub
-            x, y = st.columns([6, 1])
+            x, menos, mas, y = st.columns([5, 1, 1, 1])
             x.write(f'**{it["cantidad"]} × {it["nombre"]}** — {cop(sub)}' + (f' · _{it["nota"]}_' if it["nota"] else ""))
+            if menos.button("➖", key=f"menos_{i}"):
+                it["cantidad"] -= 1
+                if it["cantidad"] < 1:
+                    carrito.pop(i)
+                st.rerun()
+            if mas.button("➕", key=f"mas_{i}"):
+                it["cantidad"] = min(99, it["cantidad"] + 1)
+                st.rerun()
             if y.button("✖", key=f"quitar_{i}"):
                 carrito.pop(i)
                 st.rerun()
@@ -119,10 +150,10 @@ def tab_nueva_orden(repo: Repo):
         notas = st.text_input("Notas generales de la orden (opcional)", key=f"orden_notas_{gen}", max_chars=300)
         e1, e2 = st.columns(2)
         if e1.button("🚀 Enviar a cocina", type="primary"):
-            if tipo == "Mesa" and not mesa.strip():
+            if tipo == "Mesa" and not destino:
                 st.error("Indica el número de mesa.")
             else:
-                ok, _ = seguro(lambda: repo.crear_orden("mesa" if tipo == "Mesa" else "mostrador", mesa or None, notas or None, carrito),
+                ok, _ = seguro(lambda: repo.crear_orden("mesa" if tipo == "Mesa" else "mostrador", destino or None, notas or None, carrito),
                                "Orden enviada a cocina")
                 if ok:
                     st.session_state["carrito"] = []
@@ -156,7 +187,7 @@ def tab_ordenes(repo: Repo):
         st.success(f"🔔 {n_listas} pedido{'s' if n_listas > 1 else ''} listo{'s' if n_listas > 1 else ''} para entregar")
     for o in ordenes:
         estado = ESTADOS[o["estado"]] if o["estado"] != "lista" else "🟢 **¡LISTA PARA ENTREGAR!**"
-        titulo = f'{estado} · {"Mesa " + o["mesa"] if o["tipo"] == "mesa" else "Mostrador"} · {cop(o["total"])}'
+        titulo = f'{estado} · {servicio(o)} · {cop(o["total"])}'
         with st.expander(titulo, expanded=o["estado"] in ("enviada", "en_preparacion", "lista")):
             hora = pd.to_datetime(o["creado_en"], utc=True).tz_convert(fechas.TZ).strftime("%H:%M")
             st.caption(f'{hora} · {o["mesero"] or "—"}' + (f' · {o["notas"]}' if o["notas"] else ""))
@@ -197,11 +228,11 @@ def avisos_listos(repo: Repo):
     vistos = st.session_state.setdefault("avisos_vistos", set())
     lineas = []
     for o in listas:
-        servicio = f'Mesa {o["mesa"]}' if o["tipo"] == "mesa" else "Mostrador"
+        nombre = servicio(o)
         hora = pd.to_datetime(o.get("actualizado_en") or o["creado_en"], utc=True).tz_convert(fechas.TZ).strftime("%H:%M")
-        lineas.append(f"- **{servicio}** · lista a las {hora}")
+        lineas.append(f"- **{nombre}** · lista a las {hora}")
         if o["id"] not in vistos:                     # el toast sale una sola vez por orden; la franja se queda
-            st.toast(f"🔔 Orden lista: {servicio}")
+            st.toast(f"🔔 Orden lista: {nombre}")
             vistos.add(o["id"])
     vistos.intersection_update(o["id"] for o in listas)
     if lineas:
@@ -239,10 +270,9 @@ def boton_grande(etiqueta: str, **k) -> bool:
 def tarjeta_cocina(repo: Repo, o: dict, ahora):
     mins = minutos_espera(o["creado_en"], ahora)
     color, atrasado = semaforo(mins)
-    servicio = f'Mesa {o["mesa"]}' if o["tipo"] == "mesa" else "Mostrador"
     hora = pd.to_datetime(o["creado_en"], utc=True).tz_convert(fechas.TZ).strftime("%H:%M")
     with st.container(border=True):
-        st.markdown(f"## {servicio}")
+        st.markdown(f"## {servicio(o)}")
         st.markdown(f'**{ESTADOS_COCINA[o["estado"]]}**')
         st.markdown(f':{color}[**⏱ {mins} min' + (" · ATRASADO" if atrasado else "") + "**]")
         st.caption(f'Enviada {hora} · {o["mesero"] or "—"}')
@@ -313,7 +343,7 @@ def tab_historial(repo: Repo):
     if ordenes:
         df_o = pd.DataFrame([{
             "fecha": pd.to_datetime(o["creado_en"], utc=True).tz_convert(fechas.TZ).strftime("%Y-%m-%d %H:%M"),
-            "servicio": ("Mesa " + o["mesa"]) if o["tipo"] == "mesa" else "Mostrador", "estado": ESTADOS.get(o["estado"], o["estado"]),
+            "servicio": servicio(o), "estado": ESTADOS.get(o["estado"], o["estado"]),
             "mesero": o["mesero"], "productos": "; ".join(f'{i["cantidad"]}x {i["producto"]}' for i in o.get("items", [])),
             "total": o["total"], "archivada": o["archivado_en"] is not None} for o in ordenes])
         st.dataframe(df_o)
