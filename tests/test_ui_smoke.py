@@ -44,13 +44,17 @@ class StubSt(types.ModuleType):
         self.claves = {}
         self.fragmentos, self.ejecutados, self.expanders = {}, [], []
         self.md, self.col_specs = [], []
+        self.captions, self.botones = [], []
         self.secrets = {"supabase": {"url": "http://fake", "key": "sb_publishable_fake"}}
         self.sidebar = _Ctx(self)
 
     # --- salida ---
     def _noop(self, *a, **k):
         return None
-    set_page_config = title = subheader = write = caption = info = divider = metric = bar_chart = _noop
+    set_page_config = title = subheader = write = info = divider = metric = bar_chart = _noop
+
+    def caption(self, m, *a, **k):
+        self.captions.append(str(m))
 
     def markdown(self, m, *a, **k):
         self.md.append(str(m))
@@ -131,6 +135,7 @@ class StubSt(types.ModuleType):
         return self.inputs.get(label, False)
 
     def button(self, label, key=None, **k):
+        self.botones.append((label, bool(k.get("disabled", False))))
         return (label in self.press or key in self.press) and not k.get("disabled", False)
     form_submit_button = button
 
@@ -355,7 +360,8 @@ def test_mis_ordenes_se_refresca_sola_y_resalta_las_listas(st_stub, conn):
     assert listas >= 1
     assert "LISTA" in st_stub.expanders[0]                                   # las Lista van primero
     assert sum("LISTA" in e for e in st_stub.expanders) == listas
-    assert sum("listo" in m and "para entregar" in m for m in st_stub.success_msgs) == 1     # un solo aviso fijo, no uno por tick
+    assert not any("listo" in m and "para entregar" in m for m in st_stub.success_msgs)     # sin el recuadro antiguo «N listos»
+    assert sum("Órdenes LISTAS" in m for m in st_stub.success_msgs) == 1                    # solo la franja persistente
     # sin duplicados ni estados alterados por el refresco
     assert len(st_stub.expanders) == len(antes)
     estado_antes = {o["id"]: o["estado"] for o in repo.ordenes(*fechas.rango("Hoy"))}
@@ -403,7 +409,7 @@ def _preparar_cocina(conn):
 
 def _cocina(st, conn, **inputs):
     entrar(st, conn, "a3")
-    st.md.clear(); st.col_specs.clear(); st.warnings.clear(); st.success_msgs.clear()
+    st.md.clear(); st.col_specs.clear(); st.warnings.clear(); st.success_msgs.clear(); st.botones.clear(); st.captions.clear()
     correr(st, inputs=inputs)
 
 
@@ -430,7 +436,8 @@ def test_kds_tarjetas_orden_estados_observaciones_y_sin_precios(st_stub, conn):
     assert ":red[**⏱ 12 min · ATRASADO**]" in md and ":red[**⏱ 30 min · ATRASADO**]" in md
     # estados con emoji y texto
     assert "🆕 NUEVA" in md and "🟠 EN PREPARACIÓN" in md and "🟢 LISTA" in md
-    assert any("Lista para entregar" in m for m in st_stub.success_msgs)
+    assert ("✅ Lista · esperando al mesero", True) in st_stub.botones                # área de acción presente (desactivada)
+    assert "Sin observaciones" in st_stub.captions                                    # misma estructura en todas las tarjetas
     # observaciones destacadas (de la orden y del ítem)
     assert any("URGENTE sin sal" in w for w in st_stub.warnings)
     assert "📝 sin cebolla" in md
@@ -466,3 +473,74 @@ def test_kds_acciones_siguen_funcionando(st_stub, conn):
     assert estados() == "11=en_preparacion,12=en_preparacion,13=enviada,14=lista"
     assert correr(st_stub, press={f"k_{ids['12']}"}) and st_stub.errors == []              # en preparación → LISTA
     assert estados() == "11=en_preparacion,12=lista,13=enviada,14=lista"                   # el Lista previo se conserva
+
+
+# ---------------------------------------------------------------- AVISOS DE LISTAS (MESERO)
+def _orden_lista(conn, mesero, tipo="mesa", mesa="77"):
+    from pos.data import Repo
+    r = Repo(FakeClient(conn)); r.login(f"{mesero}@test.invalid", CLAVE)
+    oid = r.crear_orden(tipo, mesa, None, [{"producto_id": r.productos()[0]["id"], "cantidad": 1}])
+    k = Repo(FakeClient(conn)); k.login("a3@test.invalid", CLAVE)
+    k.cambiar_estado(oid, "en_preparacion"); k.cambiar_estado(oid, "lista")
+    return oid
+
+
+def _franja(st):
+    return [m for m in st.success_msgs if "Órdenes LISTAS" in m]
+
+
+def test_avisos_listos_en_ambas_secciones_con_mesa_y_hora(st_stub, conn):
+    oid = _orden_lista(conn, "a2", "mesa", "77")
+    oid_m = _orden_lista(conn, "a2", "mostrador", None)
+    entrar(st_stub, conn, "a2")
+    assert st_stub.fragmentos["avisos_listos"] == 10
+    hora = conn.admin(f"select to_char(actualizado_en at time zone 'America/Bogota','HH24:MI') from public.ordenes where id='{oid}'").strip()
+    for seccion in ("Nueva orden", "Mis órdenes"):
+        st_stub.success_msgs.clear()
+        correr(st_stub, inputs={"Sección": seccion})
+        franja = _franja(st_stub)
+        assert len(franja) == 1, seccion                                           # una sola franja por pantalla
+        assert f"**Mesa 77** · lista a las {hora}" in franja[0] and "**Mostrador**" in franja[0]
+    # el toast sale una sola vez por orden aunque la franja se redibuje
+    st_stub.toasts.clear()
+    for _ in range(3):
+        correr(st_stub, inputs={"Sección": "Nueva orden"})
+    assert not any("Mesa 77" in t for t in st_stub.toasts)
+    # al entregarla desaparece de la franja
+    repo = st_stub.session_state["repo"]
+    repo.cambiar_estado(oid, "entregada"); repo.cambiar_estado(oid_m, "entregada")
+    st_stub.success_msgs.clear()
+    correr(st_stub, inputs={"Sección": "Nueva orden"})
+    assert not any("Mesa 77" in m for m in _franja(st_stub))
+
+
+def test_avisos_listos_toast_la_primera_vez(st_stub, conn):
+    entrar(st_stub, conn, "a2")
+    st_stub.toasts.clear()
+    oid = _orden_lista(conn, "a2", "mesa", "88")
+    correr(st_stub, inputs={"Sección": "Nueva orden"})
+    assert st_stub.toasts.count("🔔 Orden lista: Mesa 88") == 1
+    correr(st_stub, inputs={"Sección": "Nueva orden"})
+    assert st_stub.toasts.count("🔔 Orden lista: Mesa 88") == 1                     # no se repite
+    st_stub.session_state["repo"].cambiar_estado(oid, "entregada")
+
+
+def test_avisos_listos_aislados_por_mesero_y_restaurante(st_stub, conn):
+    conn.admin("update public.perfiles set debe_cambiar_clave = false where usuario in ('luis','bea')")    # que entren a su pantalla
+    oid = _orden_lista(conn, "a2", "mesa", "99")                                  # orden lista de ana (TEST_A)
+    for otro in ("a2b", "b2"):                                                    # luis (mismo restaurante) y bea (otro)
+        entrar(st_stub, conn, otro)
+        st_stub.success_msgs.clear(); st_stub.toasts.clear(); st_stub.ejecutados.clear()
+        correr(st_stub, inputs={"Sección": "Nueva orden"})
+        assert "avisos_listos" in st_stub.ejecutados, otro                        # la franja sí se consultó
+        assert not any("Mesa 99" in m for m in st_stub.success_msgs + st_stub.toasts), otro
+    from pos.data import Repo
+    r = Repo(FakeClient(conn)); r.login("a2@test.invalid", CLAVE); r.cambiar_estado(oid, "entregada")
+
+
+def test_dueno_y_cocina_no_tienen_franja_de_mesero(st_stub, conn):
+    for u in ("a1", "a3"):
+        entrar(st_stub, conn, u)
+        st_stub.ejecutados.clear()
+        correr(st_stub)
+        assert "avisos_listos" not in st_stub.ejecutados, u

@@ -1,5 +1,7 @@
 """POS Restaurante: interfaz Streamlit. La seguridad real vive en la base de datos (RLS y funciones);
 aquí solo se muestran las pantallas que corresponden a cada rol."""
+from datetime import timedelta
+
 import pandas as pd
 import streamlit as st
 
@@ -150,7 +152,7 @@ def tab_ordenes(repo: Repo):
         return
     ordenes = sorted(ordenes, key=lambda o: o["estado"] != "lista")        # las Lista primero (el orden anterior se conserva)
     n_listas = sum(o["estado"] == "lista" for o in ordenes)
-    if n_listas:
+    if n_listas and repo.perfil["rol"] != "mesero":                       # el mesero ya tiene la franja persistente (avisos_listos)
         st.success(f"🔔 {n_listas} pedido{'s' if n_listas > 1 else ''} listo{'s' if n_listas > 1 else ''} para entregar")
     for o in ordenes:
         estado = ESTADOS[o["estado"]] if o["estado"] != "lista" else "🟢 **¡LISTA PARA ENTREGAR!**"
@@ -181,6 +183,29 @@ def tab_ordenes(repo: Repo):
 def mis_ordenes_auto(repo: Repo):
     """«Mis órdenes» del mesero: se refresca sola cada 5 s. Solo existe mientras esa sección está seleccionada."""
     tab_ordenes(repo)
+
+
+@st.fragment(run_every=10)
+def avisos_listos(repo: Repo):
+    """Franja persistente con las órdenes PROPIAS en estado Lista (visible en las dos secciones del mesero).
+    El servidor ya filtra por restaurante y por mesero (política ordenes_ver_mesero); aquí se filtra además por mesero_id."""
+    ok, ordenes = seguro(lambda: repo.ordenes(fechas.ahora() - timedelta(hours=12), None, incluir_archivados=False, con_items=False))
+    if not ok:
+        return
+    listas = sorted((o for o in ordenes if o["estado"] == "lista" and o.get("mesero_id") == repo.perfil["id"]),
+                    key=lambda o: o.get("actualizado_en") or o["creado_en"])
+    vistos = st.session_state.setdefault("avisos_vistos", set())
+    lineas = []
+    for o in listas:
+        servicio = f'Mesa {o["mesa"]}' if o["tipo"] == "mesa" else "Mostrador"
+        hora = pd.to_datetime(o.get("actualizado_en") or o["creado_en"], utc=True).tz_convert(fechas.TZ).strftime("%H:%M")
+        lineas.append(f"- **{servicio}** · lista a las {hora}")
+        if o["id"] not in vistos:                     # el toast sale una sola vez por orden; la franja se queda
+            st.toast(f"🔔 Orden lista: {servicio}")
+            vistos.add(o["id"])
+    vistos.intersection_update(o["id"] for o in listas)
+    if lineas:
+        st.success("🔔 **Órdenes LISTAS — recógelas en cocina:**\n\n" + "\n".join(lineas))
 
 
 # ======================================================================= COCINA
@@ -225,6 +250,8 @@ def tarjeta_cocina(repo: Repo, o: dict, ahora):
             st.markdown(f'#### {it["cantidad"]} × {it["producto"]}' + (f' — **📝 {it["nota"]}**' if it.get("nota") else ""))
         if o.get("notas"):
             st.warning(f'📝 **{o["notas"]}**')
+        else:
+            st.caption("Sin observaciones")
         if o["estado"] == "enviada" and boton_grande("▶️ Empezar a preparar", key=f'k_{o["orden_id"]}'):
             if seguro(lambda: repo.cambiar_estado(o["orden_id"], "en_preparacion"))[0]:
                 st.rerun(scope="fragment")
@@ -232,7 +259,7 @@ def tarjeta_cocina(repo: Repo, o: dict, ahora):
             if seguro(lambda: repo.cambiar_estado(o["orden_id"], "lista"))[0]:
                 st.rerun(scope="fragment")
         if o["estado"] == "lista":
-            st.success("Lista para entregar")
+            boton_grande("✅ Lista · esperando al mesero", key=f'k_{o["orden_id"]}', disabled=True)
 
 
 @st.fragment(run_every=5)
@@ -401,6 +428,7 @@ def pantalla_app(repo: Repo):
     st.title(f'🍽️ {p["tienda_nombre"]}')
 
     if p["rol"] == "mesero":
+        avisos_listos(repo)
         vista = st.radio("Sección", ["Nueva orden", "Mis órdenes"], horizontal=True, label_visibility="collapsed", key="vista_mesero")
         try:
             (tab_nueva_orden if vista == "Nueva orden" else mis_ordenes_auto)(repo)
