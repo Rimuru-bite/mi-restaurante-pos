@@ -165,6 +165,11 @@ class Auth:
         self.cl.uid = r
         return SimpleNamespace(user=SimpleNamespace(id=r), session=SimpleNamespace(access_token="fake"))
 
+    def update_user(self, attrs):
+        if not self.cl.uid:
+            raise FakeAPIError("no session")
+        self.cl.conn.admin(f"update auth.users set encrypted_password = crypt({lit(attrs['password'])}, gen_salt('bf')) where id = {lit(self.cl.uid)}")
+
     def sign_out(self):
         self.cl.uid = None
 

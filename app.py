@@ -46,6 +46,27 @@ def pantalla_login(url: str, key: str):
             st.rerun()
 
 
+# ============================================================ CLAVE TEMPORAL
+def pantalla_cambiar_clave(repo: Repo):
+    st.title("🔐 Crea tu clave")
+    st.info("Entraste con una clave temporal. Elige tu propia clave para continuar (mínimo 8 caracteres).")
+    with st.form("cambiar_clave"):
+        n1 = st.text_input("Nueva clave", type="password")
+        n2 = st.text_input("Repite la nueva clave", type="password")
+        enviar = st.form_submit_button("Guardar clave", type="primary")
+    if enviar:
+        if n1 != n2:
+            st.error("Las claves no coinciden.")
+        else:
+            ok, _ = seguro(lambda: repo.cambiar_clave(n1), "Clave actualizada")
+            if ok:
+                st.rerun()
+    if st.button("Cerrar sesión"):
+        repo.logout()
+        st.session_state.clear()
+        st.rerun()
+
+
 # ================================================================ NUEVA ORDEN
 def tab_nueva_orden(repo: Repo):
     productos = repo.productos(solo_activos=True)
@@ -330,6 +351,8 @@ def main():
     repo = st.session_state.get("repo")
     if repo is None or repo.perfil is None:
         pantalla_login(url, key)
+    elif repo.perfil.get("debe_cambiar_clave"):
+        pantalla_cambiar_clave(repo)
     else:
         pantalla_app(repo)
 

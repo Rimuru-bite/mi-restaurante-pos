@@ -267,3 +267,36 @@ def test_normalizar_url():
     base = "https://abc.supabase.co"
     for u in (base, base + "/", base + "/rest/v1", base + "/rest/v1/", " " + base + "/auth/v1 "):
         assert normalizar_url(u) == base
+
+
+def test_clave_temporal_flujo_completo(conn, entrar):
+    from pos.data import ErrorApp, Repo
+    from tests.fake_supabase import FakeClient
+    from tests.conftest import CLAVE
+    conn.admin("insert into auth.users (id, aud, role, email, encrypted_password) values "
+               "('00000000-0000-0000-0000-0000000000e2','authenticated','authenticated','temp2@test.invalid', crypt('x', gen_salt('bf')))")
+    admin = entrar("a1")
+    admin.vincular_empleado("temp2@test.invalid", "temporal", "mesero")
+    assert admin.perfil.get("debe_cambiar_clave") is False                       # el dueño no está obligado
+    assert conn.admin("select debe_cambiar_clave from public.perfiles where usuario='temporal'").strip() == "t"
+    nuevo = Repo(FakeClient(conn))
+    nuevo.login("temp2@test.invalid", "x")                                       # clave temporal de la fixture
+    assert nuevo.perfil["debe_cambiar_clave"] is True
+    with pytest.raises(ErrorApp):
+        nuevo.cambiar_clave("corta")                                              # mínimo 8
+    nuevo.cambiar_clave("Mi-clave-propia-1")
+    assert nuevo.perfil["debe_cambiar_clave"] is False
+    assert conn.admin("select debe_cambiar_clave from public.perfiles where usuario='temporal'").strip() == "f"
+    Repo(FakeClient(conn)).login("temp2@test.invalid", "Mi-clave-propia-1")       # la clave nueva funciona
+    with pytest.raises(ErrorApp):
+        Repo(FakeClient(conn)).login("temp2@test.invalid", "x")                   # la temporal ya no
+
+
+def test_clave_cambiada_solo_afecta_a_quien_la_llama(conn, entrar):
+    conn.admin("update public.perfiles set debe_cambiar_clave = true where usuario in ('ana','luis')")
+    entrar("a2")._rpc("clave_cambiada")
+    est = conn.admin("select string_agg(usuario||'='||debe_cambiar_clave, ',' order by usuario) from public.perfiles where usuario in ('ana','luis')").strip()
+    assert est == "ana=false,luis=true"
+    with pytest.raises(Exception):
+        Repo = __import__("pos.data", fromlist=["Repo"]).Repo
+        Repo(__import__("tests.fake_supabase", fromlist=["FakeClient"]).FakeClient(conn))._rpc("clave_cambiada")   # sin sesión

@@ -210,3 +210,18 @@ def test_dueno_opera_menu_equipo_y_archivo(st_stub, conn):
     assert any("Archivadas" in m for m in st_stub.success_msgs) and st_stub.errors == []
     # las tablas de reportes salen con datos
     assert any(len(f) for f in st_stub.frames)
+
+
+def test_clave_temporal_obliga_a_cambiarla_antes_de_entrar(st_stub, conn):
+    conn.admin("insert into auth.users (id, aud, role, email, encrypted_password) values "
+               f"('00000000-0000-0000-0000-0000000000e3','authenticated','authenticated','tmp3@test.invalid', crypt('{CLAVE}', gen_salt('bf')));"
+               "insert into public.perfiles (id, usuario, rol, tienda_id, debe_cambiar_clave) values "
+               "('00000000-0000-0000-0000-0000000000e3','tmp3','mesero','TEST_A', true);")
+    st_stub.tab_names = []
+    entrar(st_stub, conn, "tmp3")
+    assert st_stub.tab_names == [] and st_stub.errors == []                       # solo la pantalla de cambio
+    correr(st_stub, inputs={"Nueva clave": "uno-123456", "Repite la nueva clave": "otro-123456"}, press={"Guardar clave"})
+    assert st_stub.errors == ["Las claves no coinciden."]
+    assert correr(st_stub, inputs={"Nueva clave": "Clave-nueva-123", "Repite la nueva clave": "Clave-nueva-123"}, press={"Guardar clave"})
+    correr(st_stub)
+    assert st_stub.tab_names == ["Nueva orden", "Mis órdenes"]

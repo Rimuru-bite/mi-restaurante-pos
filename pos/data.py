@@ -41,7 +41,7 @@ class Repo:
             uid = r.user.id
         except Exception as e:
             raise ErrorApp("Correo o clave incorrectos.") from e
-        filas = self._tabla("perfiles", lambda t: t.select("id, usuario, rol, tienda_id, activo").eq("id", uid))
+        filas = self._tabla("perfiles", lambda t: t.select("*").eq("id", uid))
         if not filas or not filas[0]["activo"]:
             self.logout()
             raise ErrorApp("Tu cuenta no tiene acceso a ningún restaurante. Pide al dueño que te vincule o te reactive.")
@@ -50,6 +50,18 @@ class Repo:
         p["tienda_nombre"] = r_t[0]["nombre"] if r_t else p["tienda_id"]
         self.perfil = p
         return p
+
+    def cambiar_clave(self, nueva: str):
+        """Cambia la clave del usuario en sesión (Supabase Auth) y apaga la marca de clave temporal."""
+        if len(nueva or "") < 8:
+            raise ErrorApp("La clave debe tener al menos 8 caracteres.")
+        try:
+            self.c.auth.update_user({"password": nueva})
+        except Exception as e:
+            raise ErrorApp("No se pudo cambiar la clave. Usa una distinta a la temporal y vuelve a intentarlo.") from e
+        self._rpc("clave_cambiada")
+        if self.perfil:
+            self.perfil["debe_cambiar_clave"] = False
 
     def logout(self):
         try:
