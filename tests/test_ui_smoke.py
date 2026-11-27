@@ -43,13 +43,17 @@ class StubSt(types.ModuleType):
         self.errors, self.success, self.frames, self.toasts, self.warnings = [], [], [], [], []
         self.claves = {}
         self.fragmentos, self.ejecutados, self.expanders = {}, [], []
+        self.md, self.col_specs = [], []
         self.secrets = {"supabase": {"url": "http://fake", "key": "sb_publishable_fake"}}
         self.sidebar = _Ctx(self)
 
     # --- salida ---
     def _noop(self, *a, **k):
         return None
-    set_page_config = title = subheader = markdown = write = caption = info = divider = metric = bar_chart = _noop
+    set_page_config = title = subheader = write = caption = info = divider = metric = bar_chart = _noop
+
+    def markdown(self, m, *a, **k):
+        self.md.append(str(m))
 
     def warning(self, m, *a, **k):
         self.warnings.append(str(m))
@@ -89,6 +93,7 @@ class StubSt(types.ModuleType):
 
     # --- contenedores ---
     def columns(self, spec, **k):
+        self.col_specs.append(spec if isinstance(spec, int) else len(spec))
         return [_Ctx(self) for _ in range(spec if isinstance(spec, int) else len(spec))]
 
     def tabs(self, nombres):
@@ -111,16 +116,16 @@ class StubSt(types.ModuleType):
     def number_input(self, label, min_value=None, max_value=None, value=None, **k):
         return self.inputs.get(label, value if value is not None else (min_value or 0))
 
-    def _elegir(self, label, opciones, **k):
+    def _elegir(self, label, opciones, index=0, **k):
         opciones = list(opciones)
         v = self.inputs.get(label)
-        return v if v in opciones else opciones[0]
+        return v if v in opciones else opciones[index or 0]
     selectbox = _elegir
 
     def radio(self, label, opciones, **k):
         if label == "Sección":                      # selector de secciones del mesero: equivale a sus "pestañas"
             self.tab_names = list(opciones)
-        return self._elegir(label, opciones, **k)
+        return self._elegir(label, opciones, **k)          # respeta index=
 
     def checkbox(self, label, **k):
         return self.inputs.get(label, False)
@@ -373,3 +378,91 @@ def test_dueno_no_se_ve_afectado_su_pestana_ordenes_no_es_automatica(st_stub, co
     st_stub.ejecutados.clear()
     correr(st_stub)
     assert "mis_ordenes_auto" not in st_stub.ejecutados and "Órdenes" in st_stub.tab_names
+
+
+# ---------------------------------------------------------------- COCINA (KDS)
+def _preparar_cocina(conn):
+    """Deja en TEST_A solo 4 pedidos pendientes (mesas 11 a 14) con antigüedades controladas. No devuelve nada."""
+    from pos.data import Repo
+    conn.admin("update public.ordenes set estado = 'entregada' where tienda_id = 'TEST_A' and estado in ('enviada','en_preparacion','lista')")
+    r = Repo(FakeClient(conn)); r.login("a2@test.invalid", CLAVE)
+    prod = r.productos()[0]
+    k = Repo(FakeClient(conn)); k.login("a3@test.invalid", CLAVE)
+    edades = {"11": ("2 minutes 20 seconds", None), "12": ("6 minutes 20 seconds", "en_preparacion"),
+              "13": ("12 minutes 20 seconds", None), "14": ("30 minutes 20 seconds", "lista")}
+    for mesa, (edad, estado) in edades.items():
+        nota = "sin cebolla" if mesa == "13" else None
+        oid = r.crear_orden("mesa", mesa, "URGENTE sin sal" if mesa == "12" else None,
+                            [{"producto_id": prod["id"], "cantidad": 2, "nota": nota}])
+        if estado in ("en_preparacion", "lista"):
+            k.cambiar_estado(oid, "en_preparacion")
+        if estado == "lista":
+            k.cambiar_estado(oid, "lista")
+        conn.admin(f"update public.ordenes set creado_en = now() - interval '{edad}' where id = '{oid}'")
+
+
+def _cocina(st, conn, **inputs):
+    entrar(st, conn, "a3")
+    st.md.clear(); st.col_specs.clear(); st.warnings.clear(); st.success_msgs.clear()
+    correr(st, inputs=inputs)
+
+
+def test_kds_umbrales_de_tiempo_y_color(st_stub, conn):
+    _cocina(st_stub, conn)
+    app = sys.modules["app"]
+    for mins, esperado in [(0, ("green", False)), (4, ("green", False)), (5, ("orange", False)), (10, ("orange", False)),
+                           (11, ("red", True)), (90, ("red", True))]:
+        assert app.semaforo(mins) == esperado, mins
+    from datetime import datetime, timedelta, timezone
+    ahora = datetime.now(timezone.utc)
+    assert app.minutos_espera((ahora - timedelta(minutes=7, seconds=30)).isoformat(), ahora) == 7
+    assert app.minutos_espera((ahora + timedelta(minutes=3)).isoformat(), ahora) == 0       # nunca negativo
+
+
+def test_kds_tarjetas_orden_estados_observaciones_y_sin_precios(st_stub, conn):
+    _preparar_cocina(conn)
+    _cocina(st_stub, conn)
+    md = " ".join(st_stub.md)
+    mesas = [m.split("## ")[1] for m in st_stub.md if m.startswith("## ")]
+    assert mesas == ["Mesa 14", "Mesa 13", "Mesa 12", "Mesa 11"]                 # más antigua primero
+    # tiempo y color por umbral; atrasado también cuando ya está Lista
+    assert ":green[**⏱ 2 min**]" in md and ":orange[**⏱ 6 min**]" in md
+    assert ":red[**⏱ 12 min · ATRASADO**]" in md and ":red[**⏱ 30 min · ATRASADO**]" in md
+    # estados con emoji y texto
+    assert "🆕 NUEVA" in md and "🟠 EN PREPARACIÓN" in md and "🟢 LISTA" in md
+    assert any("Lista para entregar" in m for m in st_stub.success_msgs)
+    # observaciones destacadas (de la orden y del ítem)
+    assert any("URGENTE sin sal" in w for w in st_stub.warnings)
+    assert "📝 sin cebolla" in md
+    assert "2 × " in md
+    # cocina no ve precios ni totales
+    assert "$" not in md and "COP" not in md and not any("$" in w for w in st_stub.warnings)
+
+
+def test_kds_columnas_1_2_3_y_dos_por_defecto(st_stub, conn):
+    _preparar_cocina(conn)
+    _cocina(st_stub, conn)
+    assert st_stub.col_specs == [2, 2]                                           # 4 pedidos → 2 filas de 2 (por defecto)
+    for n, filas in ((1, [1, 1, 1, 1]), (2, [2, 2]), (3, [3, 3])):
+        _cocina(st_stub, conn, Columnas=n)
+        assert st_stub.col_specs == filas, n
+    # reparto por filas: el 1.º (más antiguo) arriba a la izquierda, el 2.º a su derecha
+    _cocina(st_stub, conn, Columnas=2)
+    mesas = [m.split("## ")[1] for m in st_stub.md if m.startswith("## ")]
+    assert mesas[:2] == ["Mesa 14", "Mesa 13"]
+
+
+def test_kds_acciones_siguen_funcionando(st_stub, conn):
+    _preparar_cocina(conn)
+    entrar(st_stub, conn, "a3")
+
+    def estados():
+        return conn.admin("select string_agg(mesa||'='||estado, ',' order by mesa) from public.ordenes "
+                          "where tienda_id='TEST_A' and mesa in ('11','12','13','14') and estado in ('enviada','en_preparacion','lista')").strip()
+    assert estados() == "11=enviada,12=en_preparacion,13=enviada,14=lista"
+    ids = {m: conn.admin(f"select id from public.ordenes where tienda_id='TEST_A' and mesa='{m}' and estado in ('enviada','en_preparacion','lista')").strip()
+           for m in ("11", "12", "13", "14")}
+    assert correr(st_stub, press={f"k_{ids['11']}"}) and st_stub.errors == []              # NUEVA → en preparación
+    assert estados() == "11=en_preparacion,12=en_preparacion,13=enviada,14=lista"
+    assert correr(st_stub, press={f"k_{ids['12']}"}) and st_stub.errors == []              # en preparación → LISTA
+    assert estados() == "11=en_preparacion,12=lista,13=enviada,14=lista"                   # el Lista previo se conserva

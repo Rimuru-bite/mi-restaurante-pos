@@ -184,32 +184,72 @@ def mis_ordenes_auto(repo: Repo):
 
 
 # ======================================================================= COCINA
+ESTADOS_COCINA = {"enviada": "🆕 NUEVA", "en_preparacion": "🟠 EN PREPARACIÓN", "lista": "🟢 LISTA"}
+MIN_NARANJA, MIN_ROJO = 5, 10          # 0-4 min verde · 5-10 naranja · más de 10 rojo + ATRASADO
+
+
+def minutos_espera(creado_en, ahora=None) -> int:
+    """Minutos enteros desde que el pedido se envió a cocina (se calcula localmente, sin consultas)."""
+    ref = ahora or fechas.ahora()
+    return max(0, int((ref - pd.to_datetime(creado_en, utc=True)).total_seconds() // 60))
+
+
+def semaforo(minutos: int) -> tuple[str, bool]:
+    """(color de Streamlit, atrasado)."""
+    if minutos > MIN_ROJO:
+        return "red", True
+    if minutos >= MIN_NARANJA:
+        return "orange", False
+    return "green", False
+
+
+def boton_grande(etiqueta: str, **k) -> bool:
+    """Botón de ancho completo (cómodo en pantallas táctiles); compatible con versiones de Streamlit con y sin `width`."""
+    try:
+        return st.button(etiqueta, type="primary", width="stretch", **k)
+    except TypeError:
+        return st.button(etiqueta, type="primary", use_container_width=True, **k)
+
+
+def tarjeta_cocina(repo: Repo, o: dict, ahora):
+    mins = minutos_espera(o["creado_en"], ahora)
+    color, atrasado = semaforo(mins)
+    servicio = f'Mesa {o["mesa"]}' if o["tipo"] == "mesa" else "Mostrador"
+    hora = pd.to_datetime(o["creado_en"], utc=True).tz_convert(fechas.TZ).strftime("%H:%M")
+    with st.container(border=True):
+        st.markdown(f"## {servicio}")
+        st.markdown(f'**{ESTADOS_COCINA[o["estado"]]}**')
+        st.markdown(f':{color}[**⏱ {mins} min' + (" · ATRASADO" if atrasado else "") + "**]")
+        st.caption(f'Enviada {hora} · {o["mesero"] or "—"}')
+        for it in o["items"]:
+            st.markdown(f'#### {it["cantidad"]} × {it["producto"]}' + (f' — **📝 {it["nota"]}**' if it.get("nota") else ""))
+        if o.get("notas"):
+            st.warning(f'📝 **{o["notas"]}**')
+        if o["estado"] == "enviada" and boton_grande("▶️ Empezar a preparar", key=f'k_{o["orden_id"]}'):
+            if seguro(lambda: repo.cambiar_estado(o["orden_id"], "en_preparacion"))[0]:
+                st.rerun(scope="fragment")
+        if o["estado"] == "en_preparacion" and boton_grande("🟢 Marcar lista", key=f'k_{o["orden_id"]}'):
+            if seguro(lambda: repo.cambiar_estado(o["orden_id"], "lista"))[0]:
+                st.rerun(scope="fragment")
+        if o["estado"] == "lista":
+            st.success("Lista para entregar")
+
+
 @st.fragment(run_every=5)
 def tab_cocina(repo: Repo):
-    """Se refresca sola cada 5 segundos."""
+    """Se refresca sola cada 5 segundos. Los pedidos más antiguos van primero (arriba a la izquierda)."""
+    n = st.radio("Columnas", [1, 2, 3], index=1, horizontal=True, key="cocina_cols")
     ok, tablero = seguro(repo.tablero_cocina)
     if not ok:
         return
     if not tablero:
         st.info("No hay órdenes pendientes. 🎉")
         return
-    for o in tablero:
-        hora = pd.to_datetime(o["creado_en"], utc=True).tz_convert(fechas.TZ).strftime("%H:%M")
-        with st.container(border=True):
-            st.markdown(f'### {"Mesa " + o["mesa"] if o["tipo"] == "mesa" else "Mostrador"} · {ESTADOS[o["estado"]]}')
-            st.caption(f'{hora} · {o["mesero"] or "—"}')
-            for it in o["items"]:
-                st.markdown(f'**{it["cantidad"]} × {it["producto"]}**' + (f' — _{it["nota"]}_' if it.get("nota") else ""))
-            if o.get("notas"):
-                st.info(o["notas"])
-            if o["estado"] == "enviada" and st.button("▶️ Empezar a preparar", key=f'k_{o["orden_id"]}'):
-                if seguro(lambda: repo.cambiar_estado(o["orden_id"], "en_preparacion"))[0]:
-                    st.rerun(scope="fragment")
-            if o["estado"] == "en_preparacion" and st.button("🟢 Marcar lista", key=f'k_{o["orden_id"]}'):
-                if seguro(lambda: repo.cambiar_estado(o["orden_id"], "lista"))[0]:
-                    st.rerun(scope="fragment")
-            if o["estado"] == "lista":
-                st.success("Lista para entregar")
+    ahora = fechas.ahora()
+    for i in range(0, len(tablero), n):
+        for col, o in zip(st.columns(n), tablero[i:i + n]):
+            with col:
+                tarjeta_cocina(repo, o, ahora)
 
 
 # ======================================================================= RESUMEN
