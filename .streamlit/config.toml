@@ -1,0 +1,3 @@
+# Los errores inesperados no muestran detalles técnicos al usuario (quedan en los registros del servidor).
+[client]
+showErrorDetails = false

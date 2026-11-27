@@ -1,5 +1,6 @@
 """POS Restaurante: interfaz Streamlit. La seguridad real vive en la base de datos (RLS y funciones);
 aquí solo se muestran las pantallas que corresponden a cada rol."""
+import logging
 from datetime import timedelta
 
 import pandas as pd
@@ -7,7 +8,9 @@ import streamlit as st
 
 from pos import fechas, reportes
 from pos.config import ConfigError, leer_credenciales
-from pos.data import ErrorApp, Repo
+from pos.data import ErrorApp, Repo, SesionVencida
+
+log = logging.getLogger("pos")
 
 st.set_page_config(page_title="POS Restaurante", page_icon="🍽️", layout="wide")
 
@@ -33,6 +36,26 @@ def servicio(o: dict) -> str:
     return f'Mostrador · {o["mesa"]}' if o.get("mesa") else "Mostrador"
 
 
+def reiniciar_sesion(aviso: str):
+    """Cierra la sesión (si se puede), limpia el estado y vuelve al login mostrando el aviso."""
+    repo = st.session_state.get("repo")
+    try:
+        if repo is not None:
+            repo.logout()
+    except Exception:                    # una sesión antigua o vencida puede no poder cerrarse: no importa
+        log.warning("No se pudo cerrar la sesión al reiniciarla", exc_info=True)
+    st.session_state.clear()
+    st.session_state["aviso"] = aviso
+    st.rerun()
+
+
+def mostrar_error(e: ErrorApp):
+    """Error para el usuario; si la sesión venció, vuelve al login en lugar de quedarse atascado."""
+    if isinstance(e, SesionVencida):
+        reiniciar_sesion(str(e))
+    st.error(str(e))
+
+
 def seguro(fn, ok=None):
     """Ejecuta una acción y muestra el error de forma amigable. Devuelve (hecho, resultado)."""
     try:
@@ -41,7 +64,7 @@ def seguro(fn, ok=None):
             st.toast(ok)
         return True, r
     except ErrorApp as e:
-        st.error(str(e))
+        mostrar_error(e)
         return False, None
 
 
@@ -213,7 +236,11 @@ def tab_ordenes(repo: Repo):
 @st.fragment(run_every=5)
 def mis_ordenes_auto(repo: Repo):
     """«Mis órdenes» del mesero: se refresca sola cada 5 s. Solo existe mientras esa sección está seleccionada."""
-    tab_ordenes(repo)
+    try:                                 # en los refrescos automáticos solo corre esta función: el error se captura aquí
+        tab_ordenes(repo)
+    except ErrorApp as e:
+        log.warning("Falló el refresco de «Mis órdenes»", exc_info=True)
+        mostrar_error(e)
 
 
 @st.fragment(run_every=10)
@@ -439,10 +466,8 @@ def tab_auditoria(repo: Repo):
 
 # ======================================================================== APP
 def pantalla_app(repo: Repo):
-    ok, activa = seguro(repo.cuenta_activa)
-    if not ok:
-        return
-    if not activa:                       # el dueño desactivó esta cuenta durante la sesión
+    ok, activa = seguro(repo.cuenta_activa)      # sesión vencida → vuelve al login; otro error → se muestra y se sigue
+    if ok and not activa:                # el dueño desactivó esta cuenta durante la sesión
         repo.logout()
         st.session_state.clear()
         st.session_state["aviso"] = "Tu cuenta fue desactivada. Pide al dueño que la reactive."
@@ -463,7 +488,7 @@ def pantalla_app(repo: Repo):
         try:
             (tab_nueva_orden if vista == "Nueva orden" else mis_ordenes_auto)(repo)
         except ErrorApp as e:
-            st.error(str(e))
+            mostrar_error(e)
         return
 
     pantallas = {
@@ -479,7 +504,7 @@ def pantalla_app(repo: Repo):
             try:
                 fn(repo)
             except ErrorApp as e:
-                st.error(str(e))
+                mostrar_error(e)
 
 
 def main():
@@ -489,12 +514,21 @@ def main():
         st.error(str(e))
         st.stop()
     repo = st.session_state.get("repo")
-    if repo is None or repo.perfil is None:
-        pantalla_login(url, key)
-    elif repo.perfil.get("debe_cambiar_clave"):
-        pantalla_cambiar_clave(repo)
-    else:
-        pantalla_app(repo)
+    if repo is not None and not isinstance(repo, Repo):      # sesión creada con una versión anterior de la app
+        log.warning("Sesión antigua descartada tras una actualización")
+        reiniciar_sesion("La app se actualizó. Vuelve a iniciar sesión.")
+    try:
+        if repo is None or repo.perfil is None:
+            pantalla_login(url, key)
+        elif repo.perfil.get("debe_cambiar_clave"):
+            pantalla_cambiar_clave(repo)
+        else:
+            pantalla_app(repo)
+    except AttributeError as e:
+        if repo is None or getattr(e, "obj", None) is not repo:  # solo atributos que le faltan al objeto de la sesión
+            raise
+        log.warning("Sesión antigua sin el método %r tras una actualización", getattr(e, "name", None))
+        reiniciar_sesion("La app se actualizó. Vuelve a iniciar sesión.")
 
 
 main()

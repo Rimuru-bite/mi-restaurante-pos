@@ -1,9 +1,17 @@
 """Acceso a datos. Todo pasa por un cliente de Supabase POR SESIÓN, autenticado como el usuario:
 la seguridad real (RLS y funciones) vive en la base de datos, no aquí."""
+import logging
+
+log = logging.getLogger("pos")
+MSG_CONFLICTO = "Esta orden ya cambió en otro dispositivo; la pantalla se actualizará en unos segundos."
 
 
 class ErrorApp(Exception):
     """Error con mensaje apto para mostrar al usuario."""
+
+
+class SesionVencida(ErrorApp):
+    """La sesión de Supabase Auth venció o dejó de ser válida y no se pudo renovar: hay que volver a iniciar sesión."""
 
 
 def _mensaje(e: Exception) -> str:
@@ -25,7 +33,8 @@ class Repo:
                     self.c.auth.refresh_session()
                     return fn()
                 except Exception as e2:
-                    raise ErrorApp("Tu sesión venció. Vuelve a iniciar sesión.") from e2
+                    log.info("Sesión vencida sin poder renovarse: %s", _mensaje(e2))
+                    raise SesionVencida("Tu sesión venció. Vuelve a iniciar sesión.") from e2
             raise ErrorApp(_mensaje(e)) from e
 
     def _tabla(self, nombre, q):
@@ -112,7 +121,15 @@ class Repo:
         return self._rpc("crear_orden", {"p_tipo": tipo, "p_mesa": mesa, "p_notas": notas, "p_items": payload})
 
     def cambiar_estado(self, orden_id: str, estado: str):
-        self._rpc("cambiar_estado_orden", {"p_id": orden_id, "p_estado": estado})
+        try:
+            self._rpc("cambiar_estado_orden", {"p_id": orden_id, "p_estado": estado})
+        except SesionVencida:
+            raise
+        except ErrorApp as e:
+            if "Cambio de estado no permitido" in str(e):        # el servidor rechazó la transición (p. ej. otro dispositivo se adelantó)
+                log.info("Transición rechazada por el servidor: %s", e)
+                raise ErrorApp(MSG_CONFLICTO) from e
+            raise
 
     def tablero_cocina(self) -> list[dict]:
         return self._rpc("tablero_cocina") or []

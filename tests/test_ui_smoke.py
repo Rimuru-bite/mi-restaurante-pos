@@ -598,3 +598,124 @@ def test_menos_hasta_cero_quita_la_linea_y_mesa_sigue_exigiendo_numero(st_stub, 
     correr(st_stub, inputs=sel, press={f"rapido_{prod['id']}"})
     correr(st_stub, inputs=sel, press={"🚀 Enviar a cocina"})
     assert st_stub.errors == ["Indica el número de mesa."]                               # Mesa sin número no se envía
+
+
+# ---------------------------------------------------------------- TAREA 6: ESTABILIDAD Y SESIONES
+def _falla(repo, mensaje, tabla=None, rpc=None, refresco_falla=True):
+    """Hace que las consultas del cliente fallen con `mensaje` (todas, o solo una tabla / rpc)."""
+    from tests.fake_supabase import FakeAPIError
+    t0, r0, rpc_nombre = repo.c.table, repo.c.rpc, rpc
+
+    def table(n):
+        if (tabla is None and rpc_nombre is None) or n == tabla:
+            raise FakeAPIError(mensaje)
+        return t0(n)
+
+    def rpc_falla(n, p=None):
+        if (tabla is None and rpc_nombre is None) or n == rpc_nombre:
+            raise FakeAPIError(mensaje)
+        return r0(n, p)
+    repo.c.table, repo.c.rpc = table, rpc_falla
+    if refresco_falla:
+        def no_renueva():
+            raise FakeAPIError("Invalid Refresh Token")
+        repo.c.auth.refresh_session = no_renueva
+
+
+def test_t6_sesion_antigua_de_otra_version_vuelve_al_login(st_stub, conn):
+    class RepoViejo:                                   # objeto de una versión anterior de la clase
+        perfil = {"id": "x", "usuario": "viejo", "rol": "cocina", "tienda_id": "TEST_A", "tienda_nombre": "A"}
+    st_stub._holder["conn"] = conn
+    st_stub.session_state.clear()
+    st_stub.session_state["repo"] = RepoViejo()
+    assert correr(st_stub) and "repo" not in st_stub.session_state
+    assert "se actualizó" in st_stub.session_state["aviso"] and st_stub.errors == []
+    correr(st_stub)
+    assert any("se actualizó" in w for w in st_stub.warnings)
+
+
+def test_t6_metodo_faltante_en_la_sesion_vuelve_al_login(st_stub, conn):
+    from pos.data import Repo
+    entrar(st_stub, conn, "a3")
+    viejo = st_stub.session_state["repo"]
+
+    class SinMetodo(Repo):                             # misma clase, pero sin un método nuevo (módulo no recargado)
+        def __getattribute__(self, n):
+            if n == "cuenta_activa":
+                raise AttributeError(n, name=n, obj=self)
+            return super().__getattribute__(n)
+    r = SinMetodo(viejo.c); r.perfil = viejo.perfil
+    st_stub.session_state["repo"] = r
+    assert correr(st_stub) and "repo" not in st_stub.session_state
+    assert "se actualizó" in st_stub.session_state["aviso"]
+
+
+def test_t6_sesion_vencida_vuelve_al_login_con_aviso(st_stub, conn):
+    for usuario in ("a1", "a2", "a3"):
+        entrar(st_stub, conn, usuario)
+        _falla(st_stub.session_state["repo"], "JWT expired")
+        assert correr(st_stub), usuario                                       # rerun hacia el login
+        assert "repo" not in st_stub.session_state and "venció" in st_stub.session_state["aviso"]
+        correr(st_stub)
+        assert any("venció" in w for w in st_stub.warnings), usuario           # aviso en la pantalla de login
+
+
+def test_t6_jwt_vencido_se_renueva_y_sigue(st_stub, conn):
+    entrar(st_stub, conn, "a2")
+    repo = st_stub.session_state["repo"]
+    from tests.fake_supabase import FakeAPIError
+    t0, veces = repo.c.table, {"n": 0}
+
+    def table(n):                                       # la primera consulta falla por JWT vencido; tras renovar, funciona
+        if veces["n"] == 0:
+            veces["n"] += 1
+            raise FakeAPIError("JWT expired")
+        return t0(n)
+    repo.c.table = table
+    correr(st_stub, inputs={"Sección": "Nueva orden"})
+    assert "repo" in st_stub.session_state and st_stub.errors == []          # la renovación existente se conserva
+
+
+def test_t6_fallo_de_red_en_refrescos_no_genera_traceback(st_stub, conn, caplog):
+    import logging
+    entrar(st_stub, conn, "a2")
+    repo = st_stub.session_state["repo"]
+    app = sys.modules["app"]
+    _falla(repo, "Network error: connection reset", tabla="ordenes", refresco_falla=False)
+    st_stub.errors.clear()
+    with caplog.at_level(logging.WARNING, logger="pos"):
+        app.mis_ordenes_auto(repo)                       # un «tick» del refresco automático
+        app.avisos_listos(repo)
+    assert st_stub.errors and all("Traceback" not in e for e in st_stub.errors)
+    assert any("Mis órdenes" in r.message for r in caplog.records)          # queda registrado para diagnóstico
+    # cocina
+    entrar(st_stub, conn, "a3")
+    k = st_stub.session_state["repo"]
+    _falla(k, "Network error: timeout", rpc="tablero_cocina", refresco_falla=False)
+    st_stub.errors.clear()
+    app.tab_cocina(k)
+    assert st_stub.errors == ["Network error: timeout"]
+
+
+def test_t6_conflicto_de_transicion_mensaje_claro_y_servidor_rechaza(st_stub, conn, caplog):
+    import logging
+    from pos.data import ErrorApp, MSG_CONFLICTO
+    oid = _orden_lista(conn, "a2", "mesa", "66")                                # ya está «lista»
+    from pos.data import Repo
+    k = Repo(FakeClient(conn)); k.login("a3@test.invalid", CLAVE)
+    with caplog.at_level(logging.INFO, logger="pos"), pytest.raises(ErrorApp) as e:
+        k.cambiar_estado(oid, "en_preparacion")                                  # otro dispositivo se adelantó
+    assert str(e.value) == MSG_CONFLICTO and "->" not in str(e.value)
+    assert any("Transición rechazada" in r.message for r in caplog.records)
+    assert conn.admin(f"select estado from public.ordenes where id='{oid}'").strip() == "lista"   # el servidor la rechazó
+    with pytest.raises(ErrorApp) as e2:                                         # otros errores no se disfrazan
+        k.cambiar_estado("00000000-0000-0000-0000-000000000000", "lista")
+    assert str(e2.value) != MSG_CONFLICTO
+    r = Repo(FakeClient(conn)); r.login("a2@test.invalid", CLAVE); r.cambiar_estado(oid, "entregada")
+
+
+def test_t6_config_oculta_detalles_tecnicos():
+    import pathlib
+    import tomllib
+    cfg = tomllib.loads((pathlib.Path(__file__).parent.parent / ".streamlit" / "config.toml").read_text(encoding="utf-8"))
+    assert cfg["client"]["showErrorDetails"] is False
