@@ -32,6 +32,9 @@ def seguro(fn, ok=None):
 # ======================================================================= LOGIN
 def pantalla_login(url: str, key: str):
     st.title("🍽️ POS Restaurante")
+    aviso = st.session_state.pop("aviso", None)
+    if aviso:
+        st.warning(aviso)
     with st.form("login"):
         email = st.text_input("Correo")
         clave = st.text_input("Clave", type="password")
@@ -315,6 +318,14 @@ def tab_auditoria(repo: Repo):
 
 # ======================================================================== APP
 def pantalla_app(repo: Repo):
+    ok, activa = seguro(repo.cuenta_activa)
+    if not ok:
+        return
+    if not activa:                       # el dueño desactivó esta cuenta durante la sesión
+        repo.logout()
+        st.session_state.clear()
+        st.session_state["aviso"] = "Tu cuenta fue desactivada. Pide al dueño que la reactive."
+        st.rerun()
     p = repo.perfil
     with st.sidebar:
         st.markdown(f'**{p["tienda_nombre"]}**')

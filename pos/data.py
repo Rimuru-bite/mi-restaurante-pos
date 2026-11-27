@@ -51,6 +51,11 @@ class Repo:
         self.perfil = p
         return p
 
+    def cuenta_activa(self) -> bool:
+        """¿Sigue activo mi perfil? (la política perfiles_ver siempre deja leer la propia fila, aunque esté desactivada)"""
+        filas = self._tabla("perfiles", lambda t: t.select("activo").eq("id", self.perfil["id"]))
+        return bool(filas and filas[0]["activo"])
+
     def cambiar_clave(self, nueva: str):
         """Cambia la clave del usuario en sesión (Supabase Auth) y apaga la marca de clave temporal."""
         if len(nueva or "") < 8:

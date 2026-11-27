@@ -40,14 +40,17 @@ class StubSt(types.ModuleType):
     def reset(self):
         self.session_state = {}
         self.inputs, self.press = {}, set()
-        self.errors, self.success, self.frames, self.toasts = [], [], [], []
+        self.errors, self.success, self.frames, self.toasts, self.warnings = [], [], [], [], []
         self.secrets = {"supabase": {"url": "http://fake", "key": "sb_publishable_fake"}}
         self.sidebar = _Ctx(self)
 
     # --- salida ---
     def _noop(self, *a, **k):
         return None
-    set_page_config = title = subheader = markdown = write = caption = info = warning = divider = metric = bar_chart = _noop
+    set_page_config = title = subheader = markdown = write = caption = info = divider = metric = bar_chart = _noop
+
+    def warning(self, m, *a, **k):
+        self.warnings.append(str(m))
 
     def error(self, m, *a, **k):
         self.errors.append(str(m))
@@ -225,3 +228,26 @@ def test_clave_temporal_obliga_a_cambiarla_antes_de_entrar(st_stub, conn):
     assert correr(st_stub, inputs={"Nueva clave": "Clave-nueva-123", "Repite la nueva clave": "Clave-nueva-123"}, press={"Guardar clave"})
     correr(st_stub)
     assert st_stub.tab_names == ["Nueva orden", "Mis órdenes"]
+
+
+def test_empleado_desactivado_durante_la_sesion_vuelve_al_login_con_aviso(st_stub, conn):
+    entrar(st_stub, conn, "b2")                                    # bea, mesero activo
+    try:
+        conn.admin("update public.perfiles set activo = false where usuario = 'bea'")
+        assert correr(st_stub), st_stub.errors                     # pide rerun y limpia la sesión
+        assert "repo" not in st_stub.session_state
+        assert "desactivada" in st_stub.session_state["aviso"]
+        correr(st_stub)                                            # el login muestra el aviso una sola vez
+        assert any("desactivada" in str(m) for m in st_stub.warnings)
+    finally:
+        conn.admin("update public.perfiles set activo = true where usuario = 'bea'")
+
+
+def test_menu_vacio_con_cuenta_activa_conserva_su_aviso(st_stub, conn):
+    conn.admin("insert into public.restaurantes (tienda_id, nombre) values ('TEST_C','Restaurante C');"
+               "insert into auth.users (id, aud, role, email, encrypted_password) values "
+               f"('00000000-0000-0000-0000-0000000000e4','authenticated','authenticated','vacio@test.invalid', crypt('{CLAVE}', gen_salt('bf')));"
+               "insert into public.perfiles (id, usuario, rol, tienda_id) values ('00000000-0000-0000-0000-0000000000e4','vacio','mesero','TEST_C');")
+    entrar(st_stub, conn, "vacio")
+    assert any("Todavía no hay productos" in str(m) for m in st_stub.warnings)
+    assert "repo" in st_stub.session_state                         # sigue dentro: no es una cuenta desactivada
