@@ -21,6 +21,15 @@ def _jwt_role(key: str):
         return None
 
 
+def normalizar_url(url: str) -> str:
+    """Deja solo la base del proyecto: quita espacios, barras finales y sufijos /rest/v1 o /auth/v1 pegados por error."""
+    u = (url or "").strip().rstrip("/")
+    for suf in ("/rest/v1", "/auth/v1"):
+        if u.lower().endswith(suf):
+            u = u[: -len(suf)].rstrip("/")
+    return u
+
+
 def leer_credenciales(secrets) -> tuple[str, str]:
     """Acepta [supabase] url/key o el formato anterior [connections.supabase] SUPABASE_URL/SUPABASE_KEY."""
     url = key = None
@@ -42,4 +51,4 @@ def leer_credenciales(secrets) -> tuple[str, str]:
             "La clave configurada es de tipo service_role/secret y se salta toda la seguridad. "
             "Usa la clave anon (publishable) en la app. Rota la clave actual en Supabase si estuvo expuesta."
         )
-    return url, key
+    return normalizar_url(url), key.strip()

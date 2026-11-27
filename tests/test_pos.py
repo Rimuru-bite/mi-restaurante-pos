@@ -260,3 +260,10 @@ def test_config_credenciales():
             leer_credenciales(mala)
     with pytest.raises(ConfigError, match="Faltan"):
         leer_credenciales({})
+
+
+def test_normalizar_url():
+    from pos.config import normalizar_url
+    base = "https://abc.supabase.co"
+    for u in (base, base + "/", base + "/rest/v1", base + "/rest/v1/", " " + base + "/auth/v1 "):
+        assert normalizar_url(u) == base
